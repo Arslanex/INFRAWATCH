@@ -3,13 +3,13 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from iw_agent.cli.action_prompts import print_action_result
-from iw_agent.cli.action_runner import run_action_with_prompts
-from iw_agent.cli.interactive.navigator import Navigator, Page, PageContext, PageResult
+from iw_agent.cli.action_runner import pause, run_action_in_hub
+from iw_agent.cli.interactive.context import PageContext
+from iw_agent.cli.interactive.hub import pick_or_fallback, run_action_hub
 from iw_agent.cli.interactive.selector import prompt_choice, prompt_yes_no
 from iw_agent.cli.output import (
     DIM,
@@ -36,7 +36,6 @@ from iw_agent.cli.output import (
 from iw_agent.cli.parser import add_interactive_flags
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.core.actions import ActionRequest, ActionResult, ExecutorOptions
-from iw_agent.core.exceptions import ActionCancelledError, ActionDeniedError
 from iw_agent.modules.ssl.collector import (
     DEFAULT_CERTBOT_LIVE_DIR,
     cert_name_from_path,
@@ -266,33 +265,6 @@ def _cert_params(context: PageContext, certificate: Certificate) -> dict:
     }
 
 
-@dataclass(frozen=True)
-class _HubEntry:
-    label: str
-    hint: str = ""
-    action_id: str = ""
-    kind: str = "action"
-
-
-def _cert_hub_menu(certificate: Certificate) -> list[_HubEntry]:
-    menu: list[_HubEntry] = []
-    _badge, status, _text, _bar, tone = cert_expiry_details(certificate.not_after)
-
-    if _is_certbot_certificate(certificate):
-        renew_hint = "certbot renew --cert-name"
-        if tone in {"bad", "warn"}:
-            renew_hint = f"{status.lower()} — renew with certbot"
-        menu.append(_HubEntry("Renew certificate", renew_hint, "renew_certificate"))
-
-    menu.extend(
-        [
-            _HubEntry("View details", "domain, issuer, expiry, path", "view_certificate"),
-            _HubEntry("More", "file path and validity window"),
-        ]
-    )
-    return menu
-
-
 async def _refresh_certificates(context: PageContext) -> None:
     args = context.args
     certificates = await collect_certificates(
@@ -315,18 +287,11 @@ async def _run_cert_action(
         target_id=certificate.cert_path,
         params=params or _cert_params(context, certificate),
     )
-    try:
-        return await run_action_with_prompts(
-            request,
-            options=context.data["options"],
-            target_label=certificate.domain,
-        )
-    except ActionCancelledError:
-        print("\nCancelled.")
-        return None
-    except ActionDeniedError as exc:
-        print(f"\n{exc.message}")
-        return None
+    return await run_action_in_hub(
+        request,
+        options=context.data["options"],
+        target_label=certificate.domain,
+    )
 
 
 async def _prompt_renew_params(context: PageContext, params: dict) -> bool:
@@ -343,269 +308,214 @@ def _valid_domain(domain: str) -> bool:
     return bool(_DOMAIN_RE.match(domain))
 
 
+def _picker_summary(certificates: list[Certificate]) -> str:
+    if not certificates:
+        return "No certificates found on disk."
+    parts = [_certs_summary(certificates)]
+    alert = _expiring_alert(certificates)
+    if alert:
+        parts.append(alert)
+    return " · ".join(parts)
+
+
+async def _interactive_pick_certificate(
+    args: argparse.Namespace,
+    certificates: list[Certificate],
+):
+    from iw_agent.modules.ssl.cert_picker import pick_certificate
+
+    return await pick_or_fallback(
+        lambda: pick_certificate(
+            certificates,
+            summary=_picker_summary(certificates),
+            dry_run=getattr(args, "dry_run", False),
+        ),
+        lambda: _interactive_pick_certificate_fallback(certificates),
+    )
+
+
+async def _interactive_pick_certificate_fallback(
+    certificates: list[Certificate],
+):
+    from iw_agent.modules.ssl.cert_picker import CertListChoice
+
+    from iw_agent.cli.output import clear_screen, print_page_header
+
+    clear_screen()
+    print_page_header("Certificates", "ssl")
+    print_page_divider()
+    alert = _expiring_alert(certificates)
+    if alert:
+        print_page_summary(alert)
+        print_page_divider()
+    if not certificates:
+        print_page_summary("No certificates found on disk.")
+    else:
+        print_page_summary(_certs_summary(certificates))
+        for index, certificate in enumerate(certificates, start=1):
+            print_menu_item(index, certificate.domain, _cert_list_hint(certificate))
+    obtain_index = len(certificates) + 1
+    print_menu_item(obtain_index, "Obtain new certificate")
+    choice = prompt_choice(max_value=obtain_index, allow_back=False, allow_exit=True)
+    if choice is None:
+        return None
+    if choice == obtain_index:
+        return CertListChoice(kind="obtain")
+    return CertListChoice(kind="cert", certificate=certificates[choice - 1])
+
+
+async def _interactive_obtain_certificate(context: PageContext) -> Certificate | None:
+    print_page_divider()
+    print_page_summary("Domain → email → certbot certonly (nginx or webroot).")
+
+    domain = input("\nDomain (e.g. app.example.com): ").strip().lower()
+    if not domain:
+        print("Domain is required.", file=sys.stderr)
+        pause()
+        return None
+    if not _valid_domain(domain):
+        print("Enter a valid domain name.", file=sys.stderr)
+        pause()
+        return None
+
+    email = input("\nLet's Encrypt email: ").strip()
+    if not email:
+        print("Email is required.", file=sys.stderr)
+        pause()
+        return None
+
+    staging = prompt_yes_no("Use Let's Encrypt staging (test cert)?", default=False)
+    params = {
+        "domain": domain,
+        "email": email,
+        "staging": staging or getattr(context.args, "staging", False),
+        "method": "auto",
+        "certbot_live_dir": context.args.certbot_live_dir,
+        "timeout": 120.0,
+    }
+
+    print("\nPreview:")
+    print(f"  domain: {domain}")
+    print(f"  email: {email}")
+    print(f"  staging: {'yes' if params['staging'] else 'no'}")
+
+    if not prompt_yes_no("\nObtain this certificate?", default=True):
+        return None
+
+    request = ActionRequest(
+        module="ssl",
+        action_id="obtain_certificate",
+        target_id=domain,
+        params=params,
+    )
+    result = await run_action_in_hub(
+        request,
+        options=context.data["options"],
+        target_label=domain,
+    )
+    if result is None:
+        pause()
+        return None
+
+    print()
+    print_action_result(result)
+    pause()
+    if not result.ok:
+        return None
+
+    await _refresh_certificates(context)
+    live_path = str(Path(context.args.certbot_live_dir) / domain / "fullchain.pem")
+    return next(
+        (
+            cert
+            for cert in context.data["certificates"]
+            if cert.cert_path == live_path or cert.domain == domain
+        ),
+        None,
+    )
+
+
+async def _perform_cert_action(
+    context: PageContext,
+    certificate: Certificate,
+    action_id: str,
+) -> Certificate:
+    params = _cert_params(context, certificate)
+    if action_id == "renew_certificate":
+        if not await _prompt_renew_params(context, params):
+            return certificate
+
+    result = await _run_cert_action(
+        context,
+        certificate,
+        action_id,
+        params=params,
+    )
+    if result is None:
+        pause()
+        return certificate
+
+    print()
+    if action_id == "view_certificate":
+        print(result.message)
+    else:
+        print_action_result(result)
+    pause()
+
+    if result.ok and action_id == "renew_certificate":
+        await _refresh_certificates(context)
+        return next(
+            (
+                cert
+                for cert in context.data["certificates"]
+                if cert.cert_path == certificate.cert_path
+            ),
+            certificate,
+        )
+    return certificate
+
+
+async def _interactive_cert_hub(context: PageContext, certificate: Certificate) -> bool:
+    from iw_agent.modules.ssl.action_picker import pick_cert_action
+
+    return await run_action_hub(
+        certificate,
+        pick=lambda target: pick_cert_action(
+            target,
+            dry_run=context.data["options"].dry_run,
+        ),
+        perform=lambda target, action: _perform_cert_action(
+            context,
+            target,
+            action.action_id,
+        ),
+    )
+
+
 async def run_certs_interactive(args: argparse.Namespace) -> None:
     prepare_command_view(plain=args.plain)
-    certificates = _ordered_certificates(
-        await collect_certificates(
-            certbot_live_dir=args.certbot_live_dir,
-            nginx_cert_paths=args.nginx_paths,
-        )
-    )
     options = ExecutorOptions(dry_run=getattr(args, "dry_run", False))
     context = PageContext(
         args=args,
-        data={"certificates": certificates, "options": options},
+        data={"certificates": [], "options": options},
     )
-    await Navigator(context).run(_InteractiveCertListPage())
+    await _refresh_certificates(context)
 
-
-class _InteractiveCertListPage(Page):
-    @property
-    def title(self) -> str:
-        return "Certificates"
-
-    @property
-    def subtitle(self) -> str:
-        return "ssl"
-
-    def render(self, context: PageContext) -> None:
-        certificates: list[Certificate] = context.data["certificates"]
-        obtain_index = len(certificates) + 1
-        print_page_divider()
-
-        alert = _expiring_alert(certificates)
-        if alert:
-            print_page_summary(alert)
-            print_page_divider()
-
-        if not certificates:
-            print_page_summary("No certificates found on disk.")
-            print_menu_item(obtain_index, "Obtain new certificate")
-            return
-
-        for index, certificate in enumerate(certificates, start=1):
-            print_menu_item(index, certificate.domain, _cert_list_hint(certificate))
-        print_menu_item(obtain_index, "Obtain new certificate")
-
-    async def handle(self, context: PageContext) -> PageResult | Page:
-        certificates: list[Certificate] = context.data["certificates"]
-        obtain_index = len(certificates) + 1
-
-        choice = prompt_choice(max_value=obtain_index, allow_back=False, allow_exit=True)
-        if choice is None:
-            return PageResult.EXIT
-        if choice == obtain_index:
-            return _ObtainCertificateWizardPage()
-        return _InteractiveCertDetailPage(certificates[choice - 1])
-
-
-class _InteractiveCertDetailPage(Page):
-    def __init__(self, certificate: Certificate) -> None:
-        self._certificate = certificate
-        self._menu = _cert_hub_menu(certificate)
-
-    @property
-    def title(self) -> str:
-        return self._certificate.domain
-
-    @property
-    def subtitle(self) -> str:
-        return "ssl"
-
-    def render(self, context: PageContext) -> None:
-        certificate = self._certificate
-        _badge, _status, expiry_text, bar_percent, tone = cert_expiry_details(
-            certificate.not_after,
-        )
-        print_page_divider()
-        print_page_summary(_cert_list_hint(certificate))
-        print(f"   {format_meter('Left', bar_percent)}")
-        print(f"   issuer: {format_optional(certificate.issuer, fallback='unknown')}")
-        print_page_divider()
-        for index, entry in enumerate(self._menu, start=1):
-            print_menu_item(index, entry.label, entry.hint)
-
-    async def handle(self, context: PageContext) -> PageResult | Page:
-        choice = prompt_choice(max_value=len(self._menu), allow_back=True, allow_exit=True)
-        if choice is None:
-            return PageResult.EXIT
-        if choice == -1:
-            return PageResult.BACK
-
-        entry = self._menu[choice - 1]
-        if entry.kind == "more" or not entry.action_id:
-            return _CertMorePage(self._certificate)
-
-        params = _cert_params(context, self._certificate)
-        if entry.action_id == "renew_certificate":
-            if not await _prompt_renew_params(context, params):
-                return PageResult.STAY
-
-        result = await _run_cert_action(
-            context,
-            self._certificate,
-            entry.action_id,
-            params=params,
-        )
-        if result is None:
-            input("\nPress Enter to continue...")
-            return PageResult.STAY
-
-        print()
-        if entry.action_id == "view_certificate":
-            print(result.message)
-        else:
-            print_action_result(result)
-        input("\nPress Enter to continue...")
-
-        if result.ok and entry.action_id == "renew_certificate":
-            await _refresh_certificates(context)
-            refreshed = next(
-                (
-                    cert
-                    for cert in context.data["certificates"]
-                    if cert.cert_path == self._certificate.cert_path
-                ),
-                self._certificate,
-            )
-            self._certificate = refreshed
-            self._menu = _cert_hub_menu(refreshed)
-        return PageResult.STAY
-
-
-class _CertMorePage(Page):
-    def __init__(self, certificate: Certificate) -> None:
-        self._certificate = certificate
-
-    @property
-    def title(self) -> str:
-        return self._certificate.domain
-
-    @property
-    def subtitle(self) -> str:
-        return "ssl · more"
-
-    def render(self, context: PageContext) -> None:
-        certificate = self._certificate
-        print_page_divider()
-        print_page_summary(certificate.source)
-        if certificate.not_before:
-            print(f"\n   Valid from: {certificate.not_before.strftime('%Y-%m-%d')}")
-        if certificate.not_after:
-            print(f"   Valid until: {certificate.not_after.strftime('%Y-%m-%d')}")
-        print(f"\n   File: {certificate.cert_path}")
-        if _is_certbot_certificate(certificate):
-            print(f"   Cert name: {cert_name_from_path(certificate.cert_path)}")
-        print_page_divider()
-        print_menu_item(1, "View details")
-
-    async def handle(self, context: PageContext) -> PageResult | Page:
-        choice = prompt_choice(max_value=1, allow_back=True, allow_exit=True)
-        if choice is None:
-            return PageResult.EXIT
-        if choice == -1:
-            return PageResult.BACK
-
-        result = await _run_cert_action(context, self._certificate, "view_certificate")
-        if result is None:
-            input("\nPress Enter to continue...")
-            return PageResult.STAY
-
-        print()
-        print(result.message)
-        input("\nPress Enter to continue...")
-        return PageResult.STAY
-
-
-class _ObtainCertificateWizardPage(Page):
-    @property
-    def title(self) -> str:
-        return "Obtain certificate"
-
-    @property
-    def subtitle(self) -> str:
-        return "ssl"
-
-    def render(self, context: PageContext) -> None:
-        print_page_divider()
-        print_page_summary("Domain → email → certbot certonly (nginx or webroot).")
-
-    async def handle(self, context: PageContext) -> PageResult | Page:
-        domain = input("\nDomain (e.g. app.example.com): ").strip().lower()
-        if not domain:
-            print("Domain is required.", file=sys.stderr)
-            input("\nPress Enter to continue...")
-            return PageResult.STAY
-        if not _valid_domain(domain):
-            print("Enter a valid domain name.", file=sys.stderr)
-            input("\nPress Enter to continue...")
-            return PageResult.STAY
-
-        email = input("\nLet's Encrypt email: ").strip()
-        if not email:
-            print("Email is required.", file=sys.stderr)
-            input("\nPress Enter to continue...")
-            return PageResult.STAY
-
-        staging = prompt_yes_no("Use Let's Encrypt staging (test cert)?", default=False)
-        params = {
-            "domain": domain,
-            "email": email,
-            "staging": staging or getattr(context.args, "staging", False),
-            "method": "auto",
-            "certbot_live_dir": context.args.certbot_live_dir,
-            "timeout": 120.0,
-        }
-
-        print("\nPreview:")
-        print(f"  domain: {domain}")
-        print(f"  email: {email}")
-        print(f"  staging: {'yes' if params['staging'] else 'no'}")
-
-        if not prompt_yes_no("\nObtain this certificate?", default=True):
-            return PageResult.STAY
-
-        request = ActionRequest(
-            module="ssl",
-            action_id="obtain_certificate",
-            target_id=domain,
-            params=params,
-        )
-        try:
-            result = await run_action_with_prompts(
-                request,
-                options=context.data["options"],
-                target_label=domain,
-            )
-        except ActionCancelledError:
-            print("\nCancelled.")
-            input("\nPress Enter to continue...")
-            return PageResult.STAY
-        except ActionDeniedError as exc:
-            print(f"\n{exc.message}")
-            input("\nPress Enter to continue...")
-            return PageResult.STAY
-
-        print()
-        print_action_result(result)
-        input("\nPress Enter to continue...")
-        if result.ok:
-            await _refresh_certificates(context)
-            live_path = str(
-                Path(context.args.certbot_live_dir) / domain / "fullchain.pem",
-            )
-            refreshed = next(
-                (
-                    cert
-                    for cert in context.data["certificates"]
-                    if cert.cert_path == live_path or cert.domain == domain
-                ),
-                None,
-            )
-            if refreshed is not None:
-                return _InteractiveCertDetailPage(refreshed)
-            return PageResult.BACK
-        return PageResult.STAY
+    while True:
+        await _refresh_certificates(context)
+        certificates = context.data["certificates"]
+        picked = await _interactive_pick_certificate(args, certificates)
+        if picked.quit_session:
+            break
+        if picked.value is None:
+            continue
+        if picked.value.kind == "obtain":
+            obtained = await _interactive_obtain_certificate(context)
+            if obtained is not None and await _interactive_cert_hub(context, obtained):
+                break
+            continue
+        if await _interactive_cert_hub(context, picked.value.certificate):
+            break
 
 
 COMMAND_SPECS = [

@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from iw_agent.cli.action_prompts import print_action_result
-from iw_agent.cli.action_runner import run_action_with_prompts
+from iw_agent.cli.action_runner import pause, run_action_in_hub
 from iw_agent.cli.interactive.form import (
     print_form_step,
     print_form_warning,
@@ -15,7 +15,7 @@ from iw_agent.cli.interactive.form import (
     prompt_int,
     prompt_text,
 )
-from iw_agent.cli.interactive.navigator import PageContext
+from iw_agent.cli.interactive.context import PageContext
 from iw_agent.cli.interactive.selector import prompt_choice, prompt_yes_no
 from iw_agent.core.actions import ActionResult
 from iw_agent.core.executor_runtime import has_effective_root
@@ -52,7 +52,6 @@ from iw_agent.cli.parser import add_interactive_flags, add_timeout_flag
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.core.actions import ActionRequest, ExecutorOptions
 from iw_agent.core.commands import CommandResult
-from iw_agent.core.exceptions import ActionCancelledError, ActionDeniedError
 from iw_agent.modules.nginx.collector import (
     DEFAULT_NGINX_BINARY,
     DEFAULT_NGINX_TIMEOUT_SECONDS,
@@ -379,7 +378,7 @@ async def _open_editor(args: argparse.Namespace, host: VirtualHost) -> None:
             "refusing to open it for editing",
             file=sys.stderr,
         )
-        input("\nPress Enter to continue...")
+        pause()
         return
 
     dry_run = getattr(args, "dry_run", False)
@@ -520,18 +519,11 @@ async def _run_site_action(
     options = context.data["options"]
     if skip_confirm:
         options = replace(options, skip_confirm=True)
-    try:
-        return await run_action_with_prompts(
-            request,
-            options=options,
-            target_label=_site_title(host),
-        )
-    except ActionCancelledError:
-        print("\nCancelled.")
-        return None
-    except ActionDeniedError as exc:
-        print(f"\n{exc.message}")
-        return None
+    return await run_action_in_hub(
+        request,
+        options=options,
+        target_label=_site_title(host),
+    )
 
 
 async def _refresh_profiles(context: PageContext) -> None:
@@ -602,7 +594,7 @@ async def _run_create_site_action(
     context: PageContext,
     params: dict,
     *,
-    pause: bool = True,
+    report: bool = True,
     skip_confirm: bool = False,
 ) -> bool:
     domain = str(params.get("domain", ""))
@@ -615,25 +607,15 @@ async def _run_create_site_action(
     options = context.data["options"]
     if skip_confirm:
         options = replace(options, skip_confirm=True)
-    try:
-        result = await run_action_with_prompts(
-            request,
-            options=options,
-            target_label=domain,
-        )
-    except ActionCancelledError:
-        print("\nCancelled.")
-        input("\nPress Enter to continue...")
-        return False
-    except ActionDeniedError as exc:
-        print(f"\n{exc.message}")
-        input("\nPress Enter to continue...")
+    result = await run_action_in_hub(request, options=options, target_label=domain)
+    if result is None:
+        pause()
         return False
 
-    if pause or not result.ok:
+    if report or not result.ok:
         print()
         print_action_result(result)
-        input("\nPress Enter to continue...")
+        pause()
     if result.ok:
         await _refresh_profiles(context)
     return result.ok
@@ -643,7 +625,7 @@ async def _run_create_site_with_optional_https(
     context: PageContext,
     params: dict,
     *,
-    pause: bool = True,
+    report: bool = True,
     skip_confirm: bool = False,
 ) -> bool:
     https_now = bool(params.pop("https_now", False))
@@ -653,7 +635,7 @@ async def _run_create_site_with_optional_https(
     if not await _run_create_site_action(
         context,
         params,
-        pause=pause,
+        report=report,
         skip_confirm=skip_confirm,
     ):
         return False
@@ -689,10 +671,10 @@ async def _run_create_site_with_optional_https(
     )
     if result is None:
         return True
-    if pause:
+    if report:
         print()
         print_action_result(result)
-        input("\nPress Enter to continue...")
+        pause()
     if result.ok:
         await _refresh_profiles(context)
     return result.ok
@@ -703,7 +685,7 @@ async def _prompt_cert_action_params(action_id: str, params: dict, host: Virtual
     if action_id == "secure_site":
         if not domain:
             print("Domain is required (server_name missing).", file=sys.stderr)
-            input("\nPress Enter to continue...")
+            pause()
             return False
 
         errors, warnings = await precheck_certificate_domain(str(domain))
@@ -726,7 +708,7 @@ async def _prompt_cert_action_params(action_id: str, params: dict, host: Virtual
             email = input("\nLet's Encrypt email: ").strip()
             if not email:
                 print("Email is required.", file=sys.stderr)
-                input("\nPress Enter to continue...")
+                pause()
                 return False
             params["email"] = email
 
@@ -751,6 +733,7 @@ async def run_nginx_interactive(args: argparse.Namespace) -> None:
 
     prepare_command_view(plain=args.plain)
     options = ExecutorOptions(dry_run=getattr(args, "dry_run", False))
+    picker_status = ""
 
     while True:
         profiles = await collect_site_profiles(
@@ -758,23 +741,63 @@ async def run_nginx_interactive(args: argparse.Namespace) -> None:
             nginx_timeout=args.timeout,
             certbot_live_dir=getattr(args, "certbot_live_dir", "/etc/letsencrypt/live"),
         )
-        picked = await _interactive_pick_site(args, profiles)
-        if picked is None:
+        outcome = await _interactive_pick_site(
+            args,
+            profiles,
+            status=picker_status,
+        )
+        picker_status = ""
+        if outcome.kind == "quit":
             break
-        if picked == "__new__":
+        if outcome.kind == "toggle" and outcome.host is not None:
+            picker_status = await _toggle_site_enabled(args, outcome.host, options)
+            continue
+        if outcome.kind == "new":
             host = await _interactive_create_site(args, profiles, options)
             if host is not None:
                 await _open_editor(args, host)
             continue
-        await _open_editor(args, picked)
+        if outcome.kind == "open" and outcome.host is not None:
+            await _open_editor(args, outcome.host)
+
+
+async def _toggle_site_enabled(
+    args: argparse.Namespace,
+    host: VirtualHost,
+    options: ExecutorOptions,
+) -> str:
+    if not options.dry_run and not has_effective_root():
+        return "! Enable/disable needs root — rerun with: sudo iw nginx -i"
+
+    from iw_agent.modules.nginx.editor.actions import run_named_action
+
+    action_id = "disable_site" if host.enabled else "enable_site"
+    result = await run_named_action(
+        action_id=action_id,
+        config_path=host.config_path,
+        params={
+            "nginx_binary": args.nginx_binary,
+            "nginx_timeout": args.timeout,
+            "timeout": args.timeout,
+            "certbot_live_dir": getattr(args, "certbot_live_dir", "/etc/letsencrypt/live"),
+            "staging": getattr(args, "staging", False),
+        },
+        dry_run=options.dry_run,
+    )
+    prefix = "[dry-run] " if result.dry_run else ""
+    if result.ok:
+        return f"{prefix}{result.message.replace(chr(10), ' · ')}"
+    return f"! {result.message.replace(chr(10), ' · ')}"
 
 
 async def _interactive_pick_site(
     args: argparse.Namespace,
     profiles: list[SiteProfile],
-) -> VirtualHost | str | None:
-    """Return a host to edit, ``__new__``, or ``None`` to quit."""
-    from iw_agent.modules.nginx.site_picker import SitePickerUnavailable, pick_site
+    *,
+    status: str = "",
+):
+    """Return a :class:`SitePickOutcome` from the TUI or numbered fallback."""
+    from iw_agent.modules.nginx.site_picker import SitePickerUnavailable, SitePickOutcome, pick_site
 
     hosts = [profile.virtual_host for profile in profiles if profile.virtual_host.parse_ok]
     if hosts:
@@ -783,55 +806,70 @@ async def _interactive_pick_site(
         summary = "No sites yet — create one with New site at the top."
 
     try:
-        picked = await pick_site(
+        return await pick_site(
             profiles,
             summary=summary,
             dry_run=getattr(args, "dry_run", False),
+            status=status,
         )
     except SitePickerUnavailable:
         return await _interactive_pick_site_fallback(profiles)
 
-    if picked is None:
-        return None
-    if picked == "__new__":
-        return "__new__"
-    return picked
-
 
 async def _interactive_pick_site_fallback(
     profiles: list[SiteProfile],
-) -> VirtualHost | str | None:
+):
     """Numbered fallback when the terminal is too small or not interactive."""
-    create_index = len(profiles) + 1
-    quit_index = create_index + 1 if profiles else 2
+    from iw_agent.modules.nginx.site_picker import SitePickOutcome
 
-    clear_screen()
-    print_page_header("Sites", "nginx")
-    print_page_divider()
+    while True:
+        create_index = len(profiles) + 1
+        quit_index = create_index + 1 if profiles else 2
 
-    if not profiles:
-        print_page_summary("No sites yet — create one or quit.")
-        print_menu_item(1, "New site", "minimal skeleton, then open the editor")
-        print_menu_item(2, "Quit")
-        choice = prompt_choice(max_value=2, allow_back=False, allow_exit=True)
-        if choice is None or choice == 2:
-            return None
-        return "__new__"
+        clear_screen()
+        print_page_header("Sites", "nginx")
+        print_page_divider()
 
-    for index, profile in enumerate(profiles, start=1):
-        host = profile.virtual_host
-        state = "live" if host.enabled else "off"
-        ssl = _ssl_badge_short(profile)
-        print_menu_item(index, _site_title(host), f"{state} · {ssl} · {host.config_path}")
-    print_menu_item(create_index, "New site", "create skeleton, then edit in place")
-    print_menu_item(quit_index, "Quit")
+        if not profiles:
+            print_page_summary("No sites yet — create one or quit.")
+            print_menu_item(1, "New site", "minimal skeleton, then open the editor")
+            print_menu_item(2, "Quit")
+            choice = prompt_choice(max_value=2, allow_back=False, allow_exit=True)
+            if choice is None or choice == 2:
+                return SitePickOutcome(kind="quit")
+            return SitePickOutcome(kind="new")
 
-    choice = prompt_choice(max_value=quit_index, allow_back=False, allow_exit=True)
-    if choice is None or choice == quit_index:
-        return None
-    if choice == create_index:
-        return "__new__"
-    return profiles[choice - 1].virtual_host
+        for index, profile in enumerate(profiles, start=1):
+            host = profile.virtual_host
+            state = "live" if host.enabled else "off"
+            ssl = _ssl_badge_short(profile)
+            print_menu_item(index, _site_title(host), f"{state} · {ssl} · {host.config_path}")
+        print_page_summary("Pick a site number for enable/disable or edit.")
+        print_menu_item(create_index, "New site", "create skeleton, then edit in place")
+        print_menu_item(quit_index, "Quit")
+
+        choice = prompt_choice(max_value=quit_index, allow_back=False, allow_exit=True)
+        if choice is None or choice == quit_index:
+            return SitePickOutcome(kind="quit")
+        if choice == create_index:
+            return SitePickOutcome(kind="new")
+
+        host = profiles[choice - 1].virtual_host
+        toggle_label = "Disable site" if host.enabled else "Enable site"
+        print_page_divider()
+        print_page_summary(_site_title(host))
+        print_menu_item(1, "Edit config", "structural nginx editor")
+        print_menu_item(2, toggle_label, "symlink in/out of sites-enabled + reload")
+        print_menu_item(3, "Back to site list")
+
+        action = prompt_choice(max_value=3, allow_back=True, allow_exit=True)
+        if action is None:
+            return SitePickOutcome(kind="quit")
+        if action == -1 or action == 3:
+            continue
+        if action == 1:
+            return SitePickOutcome(kind="open", host=host)
+        return SitePickOutcome(kind="toggle", host=host)
 
 
 _CREATE_SITE_STEPS = 5
@@ -867,7 +905,7 @@ async def _interactive_create_site(
             "\nCreating a site writes under /etc/nginx — rerun with: sudo iw nginx -i",
             file=sys.stderr,
         )
-        input("\nPress Enter to continue...")
+        pause()
         return None
 
     clear_screen()
@@ -1066,7 +1104,7 @@ async def _interactive_create_site(
     if not await _run_create_site_with_optional_https(
         context,
         create_params,
-        pause=False,
+        report=False,
         skip_confirm=True,
     ):
         return None

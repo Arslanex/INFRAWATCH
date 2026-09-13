@@ -109,18 +109,24 @@ def truncate_visible(text: str, width: int, *, ellipsis: str = "\u2026") -> str:
     out = []
     seen = 0
     index = 0
+    needs_reset = False
     while index < len(text) and seen < keep:
         match = _ANSI_RE.match(text, index)
         if match:
-            out.append(match.group())
+            seq = match.group()
+            out.append(seq)
+            if seq == "\033[0m":
+                needs_reset = False
+            else:
+                needs_reset = True
             index = match.end()
             continue
         out.append(text[index])
         seen += 1
         index += 1
     out.append(ellipsis)
-    if _ANSI_RE.search(text):
-        out.append(_reset())
+    if needs_reset:
+        out.append("\033[0m")
     return "".join(out)
 
 

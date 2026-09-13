@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from iw_agent.cli.interactive.navigator import PageContext
+from iw_agent.cli.interactive.context import PageContext
 from iw_agent.core.actions import ActionResult, ExecutorOptions
 from iw_agent.modules.nginx import commands
 
@@ -13,7 +13,7 @@ from iw_agent.modules.nginx import commands
 async def test_create_site_action_skips_second_confirm_when_requested(monkeypatch):
     captured: dict = {}
 
-    async def fake_run_action_with_prompts(request, *, options, target_label=""):
+    async def fake_run_action_in_hub(request, *, options, target_label=""):
         captured["skip_confirm"] = options.skip_confirm
         captured["action_id"] = request.action_id
         return ActionResult(
@@ -23,7 +23,7 @@ async def test_create_site_action_skips_second_confirm_when_requested(monkeypatc
             message="created /etc/nginx/sites-available/demo.test",
         )
 
-    monkeypatch.setattr(commands, "run_action_with_prompts", fake_run_action_with_prompts)
+    monkeypatch.setattr(commands, "run_action_in_hub", fake_run_action_in_hub)
     monkeypatch.setattr(commands, "_refresh_profiles", AsyncMock())
     monkeypatch.setattr("builtins.input", lambda _prompt="": "")
 
@@ -38,7 +38,7 @@ async def test_create_site_action_skips_second_confirm_when_requested(monkeypatc
     ok = await commands._run_create_site_action(
         context,
         {"domain": "demo.test", "site_kind": "static"},
-        pause=False,
+        report=False,
         skip_confirm=True,
     )
 

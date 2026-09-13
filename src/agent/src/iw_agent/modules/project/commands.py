@@ -30,6 +30,7 @@ from iw_agent.modules.project.collector import (
     resolve_workspace_dir,
 )
 from iw_agent.modules.project.interactive import run_project_interactive
+from iw_agent.modules.project.display import project_status_label
 from iw_agent.modules.project.schemas import DetectResult, ProjectKind, ProjectSummary
 
 
@@ -41,11 +42,11 @@ async def run_project(args: argparse.Namespace) -> None:
     action = getattr(args, "project_action", None) or "list"
     if action == "list":
         await _run_project_list(args)
-    elif action == "add":
+    elif action in {"add", "register"}:
         await _run_project_add(args)
     elif action == "detect":
         await _run_project_detect(args)
-    elif action == "deploy":
+    elif action in {"deploy", "publish"}:
         await _run_project_deploy(args)
     elif action == "stop":
         await _run_project_stop(args)
@@ -192,13 +193,9 @@ def _render_project_card(project: ProjectSummary) -> None:
         lines.append(format_field("Backend port", str(project.suggested_backend_port)))
     if project.host_ports:
         lines.append(format_field("Host ports", ", ".join(map(str, project.host_ports))))
-    if project.deploy_ok:
-        lines.append(
-            format_field(
-                "Deploy",
-                f"running ({project.containers_running} container(s))",
-            )
-        )
+    lines.append(format_field("Status", project_status_label(project)))
+    if project.domain:
+        lines.append(format_field("Domain", project.domain))
 
     print_status_box(
         badge=badge,
@@ -215,19 +212,30 @@ def _render_projects(projects: list[ProjectSummary]) -> None:
         print_empty(
             "no projects",
             "No projects are registered yet.",
-            "add one: iw project add https://github.com/user/repo",
+            "register: iw project register /path/to/existing-clone --name myapp",
         )
         return
 
     print_insight(_projects_summary(projects))
     print_info_box(
-        title="Next steps",
-        hint="workflow",
+        title="Workflow",
+        hint="by project type",
         lines=format_fields(
             [
-                ("Detect", "iw project detect <name>"),
-                ("Deploy", "iw project deploy <name>"),
-                ("Stop", "iw project stop <name>"),
+                ("Register", "iw project register /path/or/git-url --name myapp"),
+                (
+                    "docker-compose",
+                    "iw project deploy myapp [--domain …]  ·  stop: iw project stop myapp",
+                ),
+                (
+                    "proxy (uvicorn, etc.)",
+                    "start app locally, then: iw project publish myapp "
+                    "--domain … --backend-port …",
+                ),
+                (
+                    "Re-detect",
+                    "only after repo layout changes: iw project detect myapp --save",
+                ),
             ]
         ),
     )
@@ -292,19 +300,34 @@ def _configure(parser: argparse.ArgumentParser) -> None:
 
     subparsers.add_parser("list", help="list registered projects")
 
-    add_parser = subparsers.add_parser("add", help="clone git repo or register local path")
-    add_parser.add_argument(
-        "source",
-        help="git URL or local directory path",
-    )
-    add_parser.add_argument(
-        "--name",
-        default=None,
-        help="project name (default: repo or directory name)",
-    )
-    add_timeout_flag(add_parser, default=DEFAULT_GIT_TIMEOUT)
+    def _configure_register_parser(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument(
+            "source",
+            help="git URL or path to an existing local clone",
+        )
+        subparser.add_argument(
+            "--name",
+            default=None,
+            help="project name (default: repo or directory name)",
+        )
+        add_timeout_flag(subparser, default=DEFAULT_GIT_TIMEOUT)
 
-    detect_parser = subparsers.add_parser("detect", help="detect project type and check ports")
+    add_parser = subparsers.add_parser(
+        "add",
+        help="register project (alias: register)",
+    )
+    _configure_register_parser(add_parser)
+
+    register_parser = subparsers.add_parser(
+        "register",
+        help="register existing clone or clone from git (preferred name)",
+    )
+    _configure_register_parser(register_parser)
+
+    detect_parser = subparsers.add_parser(
+        "detect",
+        help="re-detect project type and ports (after repo layout changes)",
+    )
     detect_parser.add_argument("name", help="registered project name")
     detect_parser.add_argument(
         "--save",
@@ -317,49 +340,58 @@ def _configure(parser: argparse.ArgumentParser) -> None:
     add_interactive_flags(stop_parser)
     add_timeout_flag(stop_parser, default=600.0)
 
+    def _configure_publish_parser(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument("name", help="registered project name")
+        add_interactive_flags(subparser)
+        add_timeout_flag(subparser, default=600.0)
+        subparser.add_argument(
+            "--no-build",
+            action="store_true",
+            help="skip docker compose --build (compose projects only)",
+        )
+        subparser.add_argument(
+            "--force",
+            action="store_true",
+            help="continue even if ports look busy or backend is not listening",
+        )
+        subparser.add_argument(
+            "--domain",
+            default=None,
+            help="public domain for nginx (required for proxy/static publish)",
+        )
+        subparser.add_argument(
+            "--https",
+            action="store_true",
+            help="obtain Let's Encrypt certificate after nginx site is ready",
+        )
+        subparser.add_argument(
+            "--email",
+            default=None,
+            help="contact email for Let's Encrypt (required with --https)",
+        )
+        subparser.add_argument(
+            "--no-www",
+            action="store_true",
+            help="do not add www.<domain> to server_name",
+        )
+        subparser.add_argument(
+            "--backend-port",
+            type=int,
+            default=None,
+            help="local port for proxy_pass (proxy apps — e.g. uvicorn on 8000)",
+        )
+
     deploy_parser = subparsers.add_parser(
         "deploy",
-        help="deploy compose, static, or proxy projects with optional nginx and HTTPS",
+        help="deploy docker-compose stack (alias: publish for all types)",
     )
-    deploy_parser.add_argument("name", help="registered project name")
-    add_interactive_flags(deploy_parser)
-    add_timeout_flag(deploy_parser, default=600.0)
-    deploy_parser.add_argument(
-        "--no-build",
-        action="store_true",
-        help="skip docker compose --build",
+    _configure_publish_parser(deploy_parser)
+
+    publish_parser = subparsers.add_parser(
+        "publish",
+        help="publish via nginx (proxy/static) or deploy compose — preferred name",
     )
-    deploy_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="deploy even if host ports appear busy or certbot precheck warns",
-    )
-    deploy_parser.add_argument(
-        "--domain",
-        default=None,
-        help="public domain for nginx reverse proxy or static site",
-    )
-    deploy_parser.add_argument(
-        "--https",
-        action="store_true",
-        help="obtain Let's Encrypt certificate after nginx site is ready",
-    )
-    deploy_parser.add_argument(
-        "--email",
-        default=None,
-        help="contact email for Let's Encrypt (required with --https)",
-    )
-    deploy_parser.add_argument(
-        "--no-www",
-        action="store_true",
-        help="do not add www.<domain> to server_name",
-    )
-    deploy_parser.add_argument(
-        "--backend-port",
-        type=int,
-        default=None,
-        help="override backend port for nginx proxy_pass (default: detected from compose)",
-    )
+    _configure_publish_parser(publish_parser)
 
 
 COMMAND_SPECS = [

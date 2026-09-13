@@ -19,7 +19,7 @@ Short reference for the `iw` CLI (InfraWatch agent).
 | `-i` / `--interactive` | Browse and run actions (confirm + audit log) |
 | `--dry-run` | Preview write actions without applying them |
 
-**Main menu (`iw`):** commands with a manager offer **1** view (read-only) or **2** manage (`-i`). Applies to: nginx, cron, containers, processes, certs.
+**Main menu (`iw`):** commands with a manager offer **1** view (read-only) or **2** manage (`-i`). Applies to: nginx, cron, containers, processes, certs, project.
 
 Write actions are logged to `logs/actions.log`.
 
@@ -65,14 +65,14 @@ Listening ports and outbound connections.
 
 | Entry | Description |
 |-------|-------------|
-| `iw processes -i` | Browse top processes, view details or kill with confirm + audit log |
+| `iw processes -i` | Full-screen card picker: select process → action menu (details, kill) |
 | `--dry-run` | Preview kill without sending a signal |
 
 **Process hub (`-i` → process):** View details · Kill process (type `YES` to confirm)
 
 Kill sends SIGTERM by default; you can opt into SIGKILL if TERM fails. Protected PIDs (init, agent) are refused. `sudo` required for kill.
 
-Navigation: `b` back · `q` quit
+Picker: `↑↓` select · Enter manage · `q` quit. Action menu: `b` back · `q` quit.
 
 ---
 
@@ -88,14 +88,14 @@ Navigation: `b` back · `q` quit
 
 | Entry | Description |
 |-------|-------------|
-| `iw containers -i` | Browse containers, start/stop/restart with confirm + audit log |
+| `iw containers -i` | Full-screen card picker: select container → action menu (start/stop/restart, logs, details) |
 | `--dry-run` | Preview write actions without applying them |
 
-**Container hub (`-i` → container):** Restart/Stop or Start · Logs · More
+**Container hub (`-i` → container):** Restart/Stop or Start · Logs · View details
 
-Containers are grouped by compose project in the list. Docker socket access is required (often `sudo` or membership in the `docker` group).
+Picker: `↑↓` select · Enter manage · `q` quit. Action menu: `b` back · `q` quit.
 
-Navigation: `b` back · `q` quit
+Docker socket access is required (often `sudo` or membership in the `docker` group).
 
 ---
 
@@ -123,6 +123,19 @@ Navigation: `b` back · `q` quit
 | `--dry-run` | Preview saves and actions without root (no disk writes) |
 | `--staging` | Let's Encrypt test certificates |
 
+**Site picker keys:**
+
+| Keys | Action |
+|------|--------|
+| ↑↓ | Select a site |
+| Enter | Open config editor |
+| `o` | **Enable** or **disable** site (symlink in/out of `sites-enabled` + reload) |
+| `q` | Quit |
+
+Off sites (`sites-available` only) show *Action: o enable site* on the card. Live sites: *o disable*.
+
+**Numbered fallback** (non-TTY): pick site → **Edit config** or **Enable/Disable site**.
+
 **Editor layout:** left pane = config tree (line-by-line); right pane = selected directive detail.
 
 | Keys | Action |
@@ -132,6 +145,7 @@ Navigation: `b` back · `q` quit
 | Enter | Edit directive (typed form or raw line) |
 | `a` / `A` | Add after / add inside block (`+ add` rows everywhere) |
 | `s` | Save (`nginx -t` + atomic write + rollback on failure) |
+| `o` | Enable or disable this site (same as picker) |
 | `x` | Actions: test, reload, enable/disable, HTTPS, diff, revert |
 | `/` `n` `N` | Search, next/previous match |
 | `?` | Help overlay |
@@ -157,15 +171,15 @@ Requires `sudo` for real saves on the server; `--dry-run` works without root.
 
 | Entry | Description |
 |-------|-------------|
-| `iw certs -i` | Browse certificates, renew or obtain with confirm + audit log |
+| `iw certs -i` | Full-screen card picker: select cert → actions, or obtain new certificate |
 | `--dry-run` | Preview certbot commands without running them |
 | `--staging` | Let's Encrypt test certificates |
 
-**Certificate hub (`-i` → cert):** Renew (certbot) · View details · More
+**Certificate hub (`-i` → cert):** Renew (certbot) · View details
 
-List shows expiring/expired warnings at the top. **Obtain new certificate** runs certbot certonly (nginx plugin or webroot) without requiring an nginx site wizard.
+Summary shows expiring/expired warnings. **Obtain new certificate** is the last card; runs certbot certonly (nginx or webroot).
 
-Navigation: `b` back · `q` quit
+Picker: `↑↓` select · Enter open · `q` quit. Action menu: `b` back · `q` quit.
 
 ---
 
@@ -182,30 +196,30 @@ Navigation: `b` back · `q` quit
 
 | Entry | Description |
 |-------|-------------|
-| `iw cron -i` | Browse jobs, run/enable/disable with confirm + audit log |
+| `iw cron -i` | Job picker (status boxes, ↑↓ + Enter) → action menu |
 | `--dry-run` | Preview write actions without applying them |
 
-**Job hub (`-i` → job):** Run now · Enable/Disable (user crontabs only) · View history · More
+**Job hub (`-i` → job):** Run now · Enable/Disable (user crontabs only) · View history · Tail output log · View details · Show command
 
 System crontab entries (`/etc/crontab`, `/etc/cron.d`) are read-only in `-i`. User crontab jobs can be enabled or disabled (`sudo` required).
 
-Navigation: `b` back · `q` quit
+Picker: `↑↓` select · Enter manage · `q` quit. Action menu: `b` back · `q` quit.
 
 ---
 
 ## Projects
 
-Register app repositories and detect how they should be deployed.
+Register app repositories, deploy compose stacks, or **publish** proxy/static apps via nginx.
 
 | Command | Description |
 |---------|-------------|
 | `iw project` | List registered projects (same as `list`) |
 | `iw project list` | List registered projects |
-| `iw project add <source>` | Clone git repo or register local directory |
-| `iw project detect <name>` | Detect stack type and check ports |
-| `iw project deploy <name>` | Deploy compose/static/proxy projects with optional nginx + HTTPS |
+| `iw project register <source>` | Register existing local clone or clone from git (alias: `add`) |
+| `iw project detect <name>` | Re-detect stack type and ports (after repo layout changes) |
+| `iw project publish <name>` | Publish via nginx (proxy/static) or deploy compose (alias: `deploy`) |
 | `iw project stop <name>` | Run docker compose down |
-| `iw project -i` | Interactive project manager (add, detect, deploy, stop) |
+| `iw project -i` | Card picker: register → publish/deploy · nginx editor · stop |
 
 **Flags:**
 
@@ -238,30 +252,68 @@ projects/myapp/
 **Examples:**
 
 ```bash
-iw project add https://github.com/user/myapp.git
-iw project add /path/to/local-app --name myapp
-iw project detect myapp
-iw project detect myapp --save
-iw project deploy myapp
-iw project deploy myapp --domain app.example.com
-iw project deploy myapp --domain app.example.com --https --email admin@example.com
-iw project deploy myapp --dry-run --domain app.example.com --https --email admin@example.com
-iw project deploy mystatic --domain static.example.com
+# Register an existing clone (does not start the app)
+iw project register /path/to/local-app --name myapp
+
+# docker-compose
+iw project publish myapp
+iw project publish myapp --domain app.example.com --https --email admin@example.com
 iw project stop myapp
+
+# proxy app (uvicorn, etc.) — start the app yourself first
+uvicorn main:app --host 127.0.0.1 --port 8000
+iw project publish myapp --domain app.example.com --backend-port 8000
+iw project publish myapp --domain app.example.com --backend-port 8000 --https --email admin@example.com
+
+# static site
+iw project publish mystatic --domain static.example.com
+
 iw project list --json
 ```
 
-**Deploy flow:**
+**Workflow by type:**
 
-| Type | Steps |
-|------|-------|
-| `docker-compose` | port check → `docker compose up -d --build` → health check → optional nginx proxy → optional HTTPS |
-| `static` | nginx static site (`--domain` required) → optional HTTPS |
-| `proxy` | nginx reverse proxy to `--backend-port` (`--domain` required) → optional HTTPS |
+| Type | What InfraWatch does | What you do |
+|------|----------------------|-------------|
+| `docker-compose` | `docker compose up`, optional nginx + HTTPS | `register` → `publish` / `deploy` |
+| `static` | nginx serves files from repo | `register` → `publish --domain …` |
+| `proxy` | nginx → `localhost:PORT` + optional HTTPS | **Start app** (uvicorn/systemd) → `register` → `publish --domain … --backend-port …` |
+
+**Publish vs nginx `-i`:** use `iw project publish` when the app is registered in the workspace (manifest tracks domain and type). Use `iw nginx -i` only to edit nginx config without the project registry.
+
+**Re-detect:** only needed after the repo gains compose/static files — `iw project detect myapp --save`.
 
 Nginx reuses existing site configs when the domain is already registered. HTTPS chains certbot obtain → attach SSL → reload (same as `iw nginx` create wizard).
 
-**Interactive (`-i`):** project list → detect · deploy wizard (domain, backend port, HTTPS) · stop · add project. Use `--dry-run` to preview deploy steps.
+**Interactive (`-i`):** register → **Publish to web** / **Deploy stack** wizard · Edit nginx · Stop · Re-detect (advanced). Use `--dry-run` to preview steps.
+
+**Proxy publish** checks that something is listening on `--backend-port` unless `--force`.
+
+**Keep uvicorn running (systemd example):** InfraWatch publish wires nginx only — use systemd (or similar) so the app survives logout and reboot.
+
+```ini
+# /etc/systemd/system/myapp.service
+[Unit]
+Description=myapp (uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=deploy
+WorkingDirectory=/path/to/myapp
+Environment="PATH=/path/to/venv/bin"
+ExecStart=/path/to/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now myapp.service
+sudo iw project publish myapp --domain app.example.com --backend-port 8000
+```
 
 **Server setup:** `sudo ./setup-agent.sh --system` installs nginx, docker, and certbot on supported Linux distros.
 
@@ -280,13 +332,17 @@ sudo iw connections
 iw device --json
 iw metrics --plain
 
-# interactive managers
+# interactive managers (card pickers)
 sudo iw nginx -i
 sudo iw cron -i
 iw containers -i
 sudo iw processes -i
 sudo iw certs -i
 iw project -i
+
+# project: register clone, start app, publish via nginx
+iw project register /path/to/app --name myapp
+sudo iw project publish myapp --domain app.example.com --backend-port 8000
 sudo iw project -i --dry-run
 sudo iw nginx -i --dry-run
 ```

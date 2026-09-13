@@ -1,7 +1,6 @@
 """Styled prompts for multi-step CLI wizards — retry on bad input, quit with q."""
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable
 from typing import Optional
 

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
-from dataclasses import dataclass
 
 from iw_agent.cli.action_prompts import print_action_result
-from iw_agent.cli.action_runner import run_action_with_prompts
-from iw_agent.cli.interactive.navigator import Navigator, Page, PageContext, PageResult
+from iw_agent.cli.action_runner import pause, run_action_in_hub
+from iw_agent.cli.interactive.context import PageContext
+from iw_agent.cli.interactive.hub import pick_or_fallback, run_action_hub
 from iw_agent.cli.interactive.selector import prompt_choice
 from iw_agent.cli.output import (
     emit_models,
@@ -27,7 +27,6 @@ from iw_agent.cli.output import (
 from iw_agent.cli.parser import add_interactive_flags, add_limit_flag, add_timeout_flag
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.core.actions import ActionRequest, ActionResult, ExecutorOptions
-from iw_agent.core.exceptions import ActionCancelledError, ActionDeniedError
 from iw_agent.modules.docker.collector import (
     DEFAULT_CONTAINER_LIMIT,
     DEFAULT_DOCKER_SOCKET_PATH,
@@ -187,14 +186,6 @@ def _configure(parser: argparse.ArgumentParser) -> None:
     )
 
 
-@dataclass(frozen=True)
-class _HubEntry:
-    label: str
-    hint: str = ""
-    action_id: str = ""
-    kind: str = "action"
-
-
 def _container_params(context: PageContext, container: Container) -> dict:
     return {
         "container_id": container.container_id,
@@ -215,25 +206,6 @@ def _container_list_hint(container: Container) -> str:
     if ports:
         parts.append(ports)
     return " · ".join(parts)
-
-
-def _container_is_running(container: Container) -> bool:
-    return container.state.lower() == "running"
-
-
-def _container_hub_menu(container: Container) -> list[_HubEntry]:
-    if _container_is_running(container):
-        return [
-            _HubEntry("Restart", "stop then start", "restart_container"),
-            _HubEntry("Stop", "graceful shutdown", "stop_container"),
-            _HubEntry("Logs", "last stdout/stderr lines", "view_logs"),
-            _HubEntry("More", "image, ports, compose"),
-        ]
-    return [
-        _HubEntry("Start", "bring container up", "start_container"),
-        _HubEntry("Logs", "last stdout/stderr lines", "view_logs"),
-        _HubEntry("More", "image, ports, compose"),
-    ]
 
 
 async def _refresh_containers(context: PageContext) -> None:
@@ -257,191 +229,145 @@ async def _run_container_action(
         target_id=container.container_id,
         params=_container_params(context, container),
     )
-    try:
-        return await run_action_with_prompts(
-            request,
-            options=context.data["options"],
-            target_label=container.container_name,
+    return await run_action_in_hub(
+        request,
+        options=context.data["options"],
+        target_label=container.container_name,
+    )
+
+
+async def _interactive_pick_container(
+    args: argparse.Namespace,
+    containers: list[Container],
+):
+    from iw_agent.modules.docker.container_picker import pick_container
+
+    summary = (
+        _containers_summary(containers)
+        if containers
+        else "No containers found. Docker may be stopped or the socket is unreachable."
+    )
+    return await pick_or_fallback(
+        lambda: pick_container(
+            containers,
+            summary=summary,
+            dry_run=getattr(args, "dry_run", False),
+        ),
+        lambda: _interactive_pick_container_fallback(containers),
+    )
+
+
+async def _interactive_pick_container_fallback(
+    containers: list[Container],
+) -> Container | None:
+    from iw_agent.cli.output import clear_screen, print_page_header
+
+    clear_screen()
+    print_page_header("Containers", "docker")
+    print_page_divider()
+    print_page_summary(_containers_summary(containers))
+    index = 1
+    for project_name, project_containers in _group_containers(containers):
+        if project_name == "standalone":
+            heading = "Standalone"
+        else:
+            heading = f"compose: {project_name}"
+        print_page_summary(heading)
+        for container in sorted(
+            project_containers,
+            key=lambda row: row.container_name.lower(),
+        ):
+            print_menu_item(index, container.container_name, _container_list_hint(container))
+            index += 1
+    choice = prompt_choice(max_value=len(containers), allow_back=False, allow_exit=True)
+    if choice is None:
+        return None
+    return containers[choice - 1]
+
+
+async def _perform_container_action(
+    context: PageContext,
+    container: Container,
+    action_id: str,
+) -> Container:
+    result = await _run_container_action(context, container, action_id)
+    if result is None:
+        pause()
+        return container
+
+    print()
+    if action_id == "view_logs":
+        if result.stdout:
+            print(result.stdout)
+        else:
+            print_action_result(result)
+    elif action_id == "view_details":
+        print(result.message)
+    else:
+        print_action_result(result)
+    pause()
+
+    if result.ok and action_id in {
+        "start_container",
+        "stop_container",
+        "restart_container",
+    }:
+        await _refresh_containers(context)
+        return next(
+            (
+                item
+                for item in context.data["containers"]
+                if item.container_id == container.container_id
+            ),
+            container,
         )
-    except ActionCancelledError:
-        print("\nCancelled.")
-        return None
-    except ActionDeniedError as exc:
-        print(f"\n{exc.message}")
-        return None
+    return container
+
+
+async def _interactive_container_hub(context: PageContext, container: Container) -> bool:
+    from iw_agent.modules.docker.action_picker import pick_container_action
+
+    return await run_action_hub(
+        container,
+        pick=lambda target: pick_container_action(
+            target,
+            dry_run=context.data["options"].dry_run,
+        ),
+        perform=lambda target, action: _perform_container_action(
+            context,
+            target,
+            action.action_id,
+        ),
+    )
 
 
 async def run_containers_interactive(args: argparse.Namespace) -> None:
     prepare_command_view(plain=args.plain)
-    containers = _ordered_containers(
-        await collect_containers(
-            socket_path=args.socket_path,
-            timeout=args.timeout,
-            limit=args.limit,
-        )
-    )
     options = ExecutorOptions(dry_run=getattr(args, "dry_run", False))
     context = PageContext(
         args=args,
-        data={"containers": containers, "options": options},
+        data={"containers": [], "options": options},
     )
-    await Navigator(context).run(_InteractiveContainerListPage())
+    await _refresh_containers(context)
 
-
-class _InteractiveContainerListPage(Page):
-    @property
-    def title(self) -> str:
-        return "Containers"
-
-    @property
-    def subtitle(self) -> str:
-        return "docker"
-
-    def render(self, context: PageContext) -> None:
-        containers: list[Container] = context.data["containers"]
+    if not context.data["containers"]:
         print_page_divider()
-        if not containers:
-            print_page_summary(
-                "No containers found. Docker may be stopped or the socket is unreachable.",
-            )
-            return
+        print_page_summary(
+            "No containers found. Docker may be stopped or the socket is unreachable.",
+        )
+        pause()
+        return
 
-        index = 1
-        for project_name, project_containers in _group_containers(containers):
-            if project_name == "standalone":
-                heading = "Standalone"
-            else:
-                heading = f"compose: {project_name}"
-            print_page_summary(heading)
-            for container in sorted(
-                project_containers,
-                key=lambda row: row.container_name.lower(),
-            ):
-                print_menu_item(index, container.container_name, _container_list_hint(container))
-                index += 1
-
-    async def handle(self, context: PageContext) -> PageResult | Page:
-        containers: list[Container] = context.data["containers"]
-        if not containers:
-            return PageResult.EXIT
-
-        choice = prompt_choice(max_value=len(containers), allow_back=False, allow_exit=True)
-        if choice is None:
-            return PageResult.EXIT
-        return _InteractiveContainerDetailPage(containers[choice - 1])
-
-
-class _InteractiveContainerDetailPage(Page):
-    def __init__(self, container: Container) -> None:
-        self._container = container
-        self._menu = _container_hub_menu(container)
-
-    @property
-    def title(self) -> str:
-        return self._container.container_name
-
-    @property
-    def subtitle(self) -> str:
-        return "docker"
-
-    def render(self, context: PageContext) -> None:
-        print_page_divider()
-        print_page_summary(_container_list_hint(self._container))
-        if self._container.image_name:
-            print(f"   image: {self._container.image_name}")
-        print_page_divider()
-        for index, entry in enumerate(self._menu, start=1):
-            print_menu_item(index, entry.label, entry.hint)
-
-    async def handle(self, context: PageContext) -> PageResult | Page:
-        choice = prompt_choice(max_value=len(self._menu), allow_back=True, allow_exit=True)
-        if choice is None:
-            return PageResult.EXIT
-        if choice == -1:
-            return PageResult.BACK
-
-        entry = self._menu[choice - 1]
-        if entry.kind == "more" or not entry.action_id:
-            return _ContainerMorePage(self._container)
-
-        result = await _run_container_action(context, self._container, entry.action_id)
-        if result is None:
-            input("\nPress Enter to continue...")
-            return PageResult.STAY
-
-        print()
-        if entry.action_id == "view_logs":
-            if result.stdout:
-                print(result.stdout)
-            else:
-                print_action_result(result)
-        else:
-            print_action_result(result)
-        input("\nPress Enter to continue...")
-
-        if result.ok and entry.action_id in {
-            "start_container",
-            "stop_container",
-            "restart_container",
-        }:
-            await _refresh_containers(context)
-            refreshed = next(
-                (
-                    container
-                    for container in context.data["containers"]
-                    if container.container_id == self._container.container_id
-                ),
-                self._container,
-            )
-            self._container = refreshed
-            self._menu = _container_hub_menu(refreshed)
-        return PageResult.STAY
-
-
-class _ContainerMorePage(Page):
-    def __init__(self, container: Container) -> None:
-        self._container = container
-
-    @property
-    def title(self) -> str:
-        return self._container.container_name
-
-    @property
-    def subtitle(self) -> str:
-        return "docker · more"
-
-    def render(self, context: PageContext) -> None:
-        container = self._container
-        print_page_divider()
-        print_page_summary(format_state(container.state))
-        print(f"\n   Image: {container.image_name}")
-        print(f"   ID: {container.container_id[:12]}")
-        if container.compose_project_name:
-            print(f"   Compose project: {container.compose_project_name}")
-        if container.compose_service_name:
-            print(f"   Compose service: {container.compose_service_name}")
-        print(f"   Ports: {_format_ports(container.published_ports)}")
-        if container.status_message:
-            print(f"   Status: {container.status_message}")
-        print_page_divider()
-        print_menu_item(1, "View details")
-
-    async def handle(self, context: PageContext) -> PageResult | Page:
-        choice = prompt_choice(max_value=1, allow_back=True, allow_exit=True)
-        if choice is None:
-            return PageResult.EXIT
-        if choice == -1:
-            return PageResult.BACK
-
-        result = await _run_container_action(context, self._container, "view_details")
-        if result is None:
-            input("\nPress Enter to continue...")
-            return PageResult.STAY
-
-        print()
-        print(result.message)
-        input("\nPress Enter to continue...")
-        return PageResult.STAY
+    while True:
+        await _refresh_containers(context)
+        containers = context.data["containers"]
+        picked = await _interactive_pick_container(args, containers)
+        if picked.quit_session:
+            break
+        if picked.value is None:
+            continue
+        if await _interactive_container_hub(context, picked.value):
+            break
 
 
 COMMAND_SPECS = [

@@ -216,10 +216,26 @@ async def _deploy_project(
         return _fail(request, "project type could not be detected", options)
 
     if profile.kind in {ProjectKind.STATIC, ProjectKind.PROXY} and not domain:
-        return _fail(request, f"{profile.kind.value} deploy requires --domain", options)
+        return _fail(request, f"{profile.kind.value} publish requires --domain", options)
 
     if profile.kind is ProjectKind.PROXY and not deploy_opts["backend_port"] and profile.suggested_backend_port is None:
-        return _fail(request, "proxy deploy requires --backend-port", options)
+        return _fail(request, "proxy publish requires --backend-port", options)
+
+    if profile.kind is ProjectKind.PROXY and domain:
+        backend = deploy_opts["backend_port"] or profile.suggested_backend_port
+        if backend is not None and not options.dry_run:
+            port_checks = await check_ports([int(backend)])
+            if port_checks:
+                check = port_checks[0]
+                if check.note == "no listener on this port" and not deploy_opts["force"]:
+                    return _fail(
+                        request,
+                        f"nothing is listening on port {backend} — start your app first "
+                        "(e.g. uvicorn) or pass force=true",
+                        options,
+                    )
+                if check.listener:
+                    steps.append(f"backend port {backend}: {check.listener}")
 
     if profile.kind is ProjectKind.DOCKER_COMPOSE:
         if not profile.compose_file:

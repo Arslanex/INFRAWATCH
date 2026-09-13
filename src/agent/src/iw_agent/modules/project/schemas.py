@@ -81,5 +81,6 @@ class ProjectSummary(AgentModel):
     repo_path: str
     suggested_backend_port: Optional[int] = None
     host_ports: list[int] = []
+    domain: Optional[str] = None
     deploy_ok: bool = False
     containers_running: int = 0

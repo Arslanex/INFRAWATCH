@@ -136,7 +136,7 @@ def detection_hints(profile: ProjectProfile) -> list[str]:
         hints.append(f"Static site detected (root: {root}) — nginx static site fits.")
     elif profile.kind is ProjectKind.PROXY:
         hints.append(
-            "No compose/Dockerfile/static index found — treat as proxy-only "
-            "(nginx → existing localhost port).",
+            "Proxy app — start the process yourself (e.g. uvicorn on 127.0.0.1:8000), "
+            "then: iw project publish <name> --domain … --backend-port …",
         )
     return hints

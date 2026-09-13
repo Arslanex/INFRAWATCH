@@ -77,6 +77,7 @@ async def list_projects(workspace: str | None = None) -> list[ProjectSummary]:
                 repo_path=str(repo_dir(entry)),
                 suggested_backend_port=profile.suggested_backend_port,
                 host_ports=profile.host_ports,
+                domain=manifest.deploy.domain,
                 deploy_ok=manifest.deploy.last_deploy_ok,
                 containers_running=manifest.deploy.containers_running,
             )

@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from iw_agent.cli.output import BOLD, DIM, _c, _reset, highlight_row, pad_visible, truncate_visible
-from iw_agent.modules.nginx.confparse import Block, Comment, Directive, Raw
+from iw_agent.modules.nginx.confparse import Block, Directive
 from iw_agent.modules.nginx.editor.hints import hint_for_row
 from iw_agent.modules.nginx.editor.rows import Row, RowKind
 
