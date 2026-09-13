@@ -62,6 +62,29 @@ async def collect_containers(
     return containers
 
 
+async def find_container(
+    container_id: str,
+    *,
+    socket_path: str = DEFAULT_DOCKER_SOCKET_PATH,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    limit: int = DEFAULT_CONTAINER_LIMIT,
+) -> Container | None:
+    containers = await collect_containers(
+        socket_path=socket_path,
+        timeout=timeout,
+        limit=limit,
+    )
+    normalized = container_id.strip().lower()
+    for container in containers:
+        if container.container_id.lower() == normalized:
+            return container
+        if container.container_id.lower().startswith(normalized):
+            return container
+        if container.container_id[:12].lower() == normalized[:12]:
+            return container
+    return None
+
+
 async def _fetch_container_payload(
     socket_path: str,
     timeout: float,

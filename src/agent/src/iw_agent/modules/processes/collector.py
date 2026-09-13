@@ -78,6 +78,44 @@ def _collect_processes(limit: int) -> list[Process]:
     return processes
 
 
+async def find_process(pid: int) -> Process | None:
+    return await read(_find_process, pid)
+
+
+def _find_process(pid: int) -> Process | None:
+    try:
+        process_entry = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return None
+    except psutil.Error:
+        return None
+
+    try:
+        process_entry.cpu_percent(interval=None)
+        if CPU_SAMPLE_SECONDS > 0:
+            time.sleep(CPU_SAMPLE_SECONDS)
+        cpu_percent = process_entry.cpu_percent(interval=None)
+        memory_info = process_entry.memory_info()
+        command_parts = process_entry.cmdline()
+        create_time = process_entry.create_time()
+    except (psutil.Error, psutil.NoSuchProcess):
+        return None
+
+    process = Process(
+        pid=process_entry.pid,
+        parent_pid=process_entry.ppid(),
+        process_name=process_entry.name(),
+        owner=process_entry.username(),
+        status=process_entry.status(),
+        cpu_percent=cpu_percent,
+        memory_rss_bytes=getattr(memory_info, "rss", None),
+        started_at=datetime.fromtimestamp(create_time, timezone.utc),
+        command_line=" ".join(command_parts) if command_parts else None,
+    )
+    enrich_process_metadata(process)
+    return process
+
+
 def _is_background_kernel_thread(process: Process) -> bool:
     if (process.cpu_percent or 0.0) > 0.0:
         return False

@@ -1328,19 +1328,33 @@ def generate_site_config(
     domain: str,
     *,
     site_kind: SiteKind,
+    server_names: list[str] | None = None,
+    http_port: int = 80,
     document_root: str | None = None,
     index_files: str = DEFAULT_INDEX_FILES,
     try_files: str = TRY_FILES_STANDARD,
     proxy_pass: str | None = None,
 ) -> str:
+    names = server_names or [domain]
+    if domain not in names:
+        names = [domain, *names]
+
+    if http_port < 1 or http_port > 65535:
+        raise ValueError(f"invalid http_port: {http_port}")
+
     lines = [
         "# Created by InfraWatch",
         "server {",
-        "    listen 80;",
-        "    listen [::]:80;",
-        f"    server_name {domain};",
-        "",
+        f"    listen {http_port};",
     ]
+    if http_port == 80:
+        lines.append("    listen [::]:80;")
+    lines.extend(
+        [
+            f"    server_name {' '.join(names)};",
+            "",
+        ]
+    )
 
     if site_kind is SiteKind.STATIC:
         root = document_root or f"/var/www/{domain}"
@@ -1380,6 +1394,8 @@ def _create_site_sync(
     *,
     domain: str,
     site_kind: SiteKind,
+    server_names: list[str] | None,
+    http_port: int,
     document_root: str | None,
     index_files: str,
     try_files: str,
@@ -1397,6 +1413,8 @@ def _create_site_sync(
     content = generate_site_config(
         domain,
         site_kind=site_kind,
+        server_names=server_names,
+        http_port=http_port,
         document_root=document_root,
         index_files=index_files,
         try_files=try_files,
@@ -1433,6 +1451,8 @@ async def create_site_on_disk(
     *,
     domain: str,
     site_kind: SiteKind,
+    server_names: list[str] | None = None,
+    http_port: int = 80,
     document_root: str | None = None,
     index_files: str = DEFAULT_INDEX_FILES,
     try_files: str = TRY_FILES_STANDARD,
@@ -1445,6 +1465,8 @@ async def create_site_on_disk(
         config,
         domain=domain,
         site_kind=site_kind,
+        server_names=server_names,
+        http_port=http_port,
         document_root=document_root,
         index_files=index_files,
         try_files=try_files,
@@ -2326,11 +2348,17 @@ async def _create_site(
         return _fail(request, "proxy_pass is required for proxy sites", options)
 
     enable_site = bool(params.get("enable_site", True))
+    server_names = params.get("server_names")
+    if server_names is not None and not isinstance(server_names, list):
+        return _fail(request, "server_names must be a list of domain strings", options)
+    http_port = int(params.get("http_port", 80))
     try:
         deploy_result = await create_site_on_disk(
             config,
             domain=str(domain),
             site_kind=site_kind,
+            server_names=server_names,
+            http_port=http_port,
             document_root=params.get("document_root"),
             index_files=str(params.get("index_files", DEFAULT_INDEX_FILES)),
             try_files=str(params.get("try_files", TRY_FILES_STANDARD)),

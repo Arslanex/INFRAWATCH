@@ -16,6 +16,12 @@ Short reference for the `iw` CLI (InfraWatch agent).
 |------|-------------|
 | `--json` | Machine-readable JSON output |
 | `--plain` | No colors (plain text) |
+| `-i` / `--interactive` | Browse and run actions (confirm + audit log) |
+| `--dry-run` | Preview write actions without applying them |
+
+**Main menu (`iw`):** commands with a manager offer **1** view (read-only) or **2** manage (`-i`). Applies to: nginx, cron, containers, processes, certs.
+
+Write actions are logged to `logs/actions.log`.
 
 ---
 
@@ -55,6 +61,19 @@ Listening ports and outbound connections.
 
 **Flags:** `--limit N` (default: 10)
 
+**Interactive:**
+
+| Entry | Description |
+|-------|-------------|
+| `iw processes -i` | Browse top processes, view details or kill with confirm + audit log |
+| `--dry-run` | Preview kill without sending a signal |
+
+**Process hub (`-i` → process):** View details · Kill process (type `YES` to confirm)
+
+Kill sends SIGTERM by default; you can opt into SIGKILL if TERM fails. Protected PIDs (init, agent) are refused. `sudo` required for kill.
+
+Navigation: `b` back · `q` quit
+
 ---
 
 ## Docker
@@ -63,7 +82,20 @@ Listening ports and outbound connections.
 |---------|-------------|
 | `iw containers` | Docker containers (grouped by compose project) |
 
-**Flags:** `--limit N` · `--timeout SEC` · `--socket PATH`
+**Flags:** `--limit N` · `--timeout SEC` · `--socket PATH` · `--tail N`
+
+**Interactive:**
+
+| Entry | Description |
+|-------|-------------|
+| `iw containers -i` | Browse containers, start/stop/restart with confirm + audit log |
+| `--dry-run` | Preview write actions without applying them |
+
+**Container hub (`-i` → container):** Restart/Stop or Start · Logs · More
+
+Containers are grouped by compose project in the list. Docker socket access is required (often `sudo` or membership in the `docker` group).
+
+Navigation: `b` back · `q` quit
 
 ---
 
@@ -122,12 +154,15 @@ Changes are written to the site config file, then nginx is tested and reloaded (
 | Step | What you choose |
 |------|-----------------|
 | Domain | e.g. `app.example.com` |
+| Names | Optional `www` alias and extra domains (comma-separated) |
+| HTTP port | Standard `80` or custom port |
 | Type | Static files or reverse proxy |
 | Static | Document root, try_files (standard or SPA) |
 | Proxy | Backend URL (`proxy_pass`) |
 | Enable | Symlink into `sites-enabled` and reload nginx |
+| HTTPS now | Optional: certbot obtain → attach SSL → HTTP redirect → reload |
 
-Config is written to `sites-available/<domain>`. Use **Obtain HTTPS certificate** on the site afterward if needed.
+Config is written to `sites-available/<domain>`. **HTTPS now** runs the same chain as **Set up HTTPS** on the site hub (requires enable + reload first).
 
 ---
 
@@ -139,6 +174,20 @@ Config is written to `sites-available/<domain>`. Use **Obtain HTTPS certificate*
 
 **Flags:** `--certbot-dir PATH` · extra cert paths as arguments
 
+**Interactive:**
+
+| Entry | Description |
+|-------|-------------|
+| `iw certs -i` | Browse certificates, renew or obtain with confirm + audit log |
+| `--dry-run` | Preview certbot commands without running them |
+| `--staging` | Let's Encrypt test certificates |
+
+**Certificate hub (`-i` → cert):** Renew (certbot) · View details · More
+
+List shows expiring/expired warnings at the top. **Obtain new certificate** runs certbot certonly (nginx plugin or webroot) without requiring an nginx site wizard.
+
+Navigation: `b` back · `q` quit
+
 ---
 
 ## Cron
@@ -148,7 +197,20 @@ Config is written to `sites-available/<domain>`. Use **Obtain HTTPS certificate*
 | `iw cron` | Scheduled cron jobs |
 | `iw cron-history` | Recent job run results |
 
-**Flags (cron-history):** `--log-dir PATH` · `--tail N`
+**Flags:** `--log-dir PATH` · `--tail N`
+
+**Interactive:**
+
+| Entry | Description |
+|-------|-------------|
+| `iw cron -i` | Browse jobs, run/enable/disable with confirm + audit log |
+| `--dry-run` | Preview write actions without applying them |
+
+**Job hub (`-i` → job):** Run now · Enable/Disable (user crontabs only) · View history · More
+
+System crontab entries (`/etc/crontab`, `/etc/cron.d`) are read-only in `-i`. User crontab jobs can be enabled or disabled (`sudo` required).
+
+Navigation: `b` back · `q` quit
 
 ---
 
@@ -164,4 +226,12 @@ iw processes
 sudo iw connections
 iw device --json
 iw metrics --plain
+
+# interactive managers
+sudo iw nginx -i
+sudo iw cron -i
+iw containers -i
+sudo iw processes -i
+sudo iw certs -i
+sudo iw nginx -i --dry-run
 ```

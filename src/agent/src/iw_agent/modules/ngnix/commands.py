@@ -487,6 +487,47 @@ def _valid_domain(domain: str) -> bool:
     return bool(_DOMAIN_RE.match(domain))
 
 
+def _www_domain(domain: str) -> str:
+    return f"www.{domain}"
+
+
+def _build_server_names(domain: str, *, include_www: bool, extra_domains: list[str]) -> list[str]:
+    names = [domain]
+    if include_www:
+        www = _www_domain(domain)
+        if www not in names:
+            names.append(www)
+    for extra in extra_domains:
+        if extra and extra not in names:
+            names.append(extra)
+    return names
+
+
+def _parse_extra_domains(raw: str) -> tuple[list[str], str | None]:
+    if not raw.strip():
+        return [], None
+    extras: list[str] = []
+    for token in raw.replace(",", " ").split():
+        value = token.strip().lower()
+        if not value:
+            continue
+        if not _valid_domain(value):
+            return [], f"invalid domain: {value}"
+        if value not in extras:
+            extras.append(value)
+    return extras, None
+
+
+def _find_profile_by_domain(context: PageContext, domain: str) -> SiteProfile | None:
+    for profile in context.data["profiles"]:
+        host = profile.virtual_host
+        if domain in host.server_names:
+            return profile
+        if host.config_path.endswith(f"/{domain}"):
+            return profile
+    return None
+
+
 async def _run_create_site_action(context: PageContext, params: dict) -> bool:
     domain = str(params.get("domain", ""))
     request = ActionRequest(
@@ -510,6 +551,47 @@ async def _run_create_site_action(context: PageContext, params: dict) -> bool:
         input("\nPress Enter to continue...")
         return False
 
+    print()
+    print_action_result(result)
+    input("\nPress Enter to continue...")
+    if result.ok:
+        await _refresh_profiles(context)
+    return result.ok
+
+
+async def _run_create_site_with_optional_https(context: PageContext, params: dict) -> bool:
+    https_now = bool(params.pop("https_now", False))
+    email = params.pop("email", None)
+    staging = bool(params.pop("staging", False))
+
+    if not await _run_create_site_action(context, params):
+        return False
+
+    if not https_now:
+        return True
+
+    if not email:
+        print("HTTPS setup skipped — email was not provided.", file=sys.stderr)
+        return True
+
+    domain = str(params.get("domain", ""))
+    profile = _find_profile_by_domain(context, domain)
+    if profile is None:
+        print(
+            "Site created but could not find it for HTTPS setup. "
+            "Use Set up HTTPS from the site menu.",
+            file=sys.stderr,
+        )
+        return True
+
+    secure_params = _base_params(context, profile.virtual_host)
+    secure_params["email"] = email
+    secure_params["staging"] = staging or getattr(context.args, "staging", False)
+    secure_params["force"] = bool(params.get("force", False))
+
+    result = await _run_site_action(context, profile, "secure_site", secure_params)
+    if result is None:
+        return True
     print()
     print_action_result(result)
     input("\nPress Enter to continue...")
@@ -588,12 +670,13 @@ async def _prompt_cert_action_params(action_id: str, params: dict, host: Virtual
             if answer in {"n", "no"}:
                 return False
 
-        email = input("\nLet's Encrypt email: ").strip()
-        if not email:
-            print("Email is required.", file=sys.stderr)
-            input("\nPress Enter to continue...")
-            return False
-        params["email"] = email
+        if not params.get("email"):
+            email = input("\nLet's Encrypt email: ").strip()
+            if not email:
+                print("Email is required.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return False
+            params["email"] = email
 
         if "staging" not in params:
             staging = input("Use Let's Encrypt staging (test cert)? [y/N]: ").strip().lower()
@@ -671,7 +754,9 @@ class _CreateSiteWizardPage(Page):
 
     def render(self, context: PageContext) -> None:
         print_page_divider()
-        print_page_summary("Domain → type → enable. Config is written for you.")
+        print_page_summary(
+            "Domain → names/ports → type → enable → optional HTTPS. Config is written for you.",
+        )
 
     async def handle(self, context: PageContext) -> PageResult | Page:
         domain = input("\nDomain (e.g. app.example.com): ").strip().lower()
@@ -684,6 +769,42 @@ class _CreateSiteWizardPage(Page):
             input("\nPress Enter to continue...")
             return PageResult.STAY
 
+        include_www = prompt_yes_no(f"\nAlso serve www.{domain}?", default=True)
+        extra_raw = input(
+            "\nExtra domains (comma-separated, or leave empty): ",
+        ).strip()
+        extra_domains, extra_error = _parse_extra_domains(extra_raw)
+        if extra_error:
+            print(extra_error, file=sys.stderr)
+            input("\nPress Enter to continue...")
+            return PageResult.STAY
+
+        server_names = _build_server_names(
+            domain,
+            include_www=include_www,
+            extra_domains=extra_domains,
+        )
+
+        print("\nHTTP listen port:")
+        print("   1. Standard (80)")
+        print("   2. Custom port")
+        port_choice = prompt_choice(max_value=2, allow_back=False, allow_exit=True)
+        if port_choice is None:
+            return PageResult.EXIT
+        http_port = 80
+        if port_choice == 2:
+            raw_port = input("\nCustom HTTP port (e.g. 8080): ").strip()
+            try:
+                http_port = int(raw_port)
+            except ValueError:
+                print("Enter a valid port number.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            if http_port < 1 or http_port > 65535:
+                print("Port must be between 1 and 65535.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+
         print("\nSite type:")
         print("   1. Static files (HTML, assets)")
         print("   2. Reverse proxy (app on localhost)")
@@ -695,6 +816,8 @@ class _CreateSiteWizardPage(Page):
 
         params = {
             "domain": domain,
+            "server_names": server_names,
+            "http_port": http_port,
             "nginx_binary": context.args.nginx_binary,
             "nginx_timeout": context.args.timeout,
             "timeout": context.args.timeout,
@@ -724,8 +847,43 @@ class _CreateSiteWizardPage(Page):
 
         params["enable_site"] = prompt_yes_no("\nEnable site now (symlink + reload)?", default=True)
 
+        https_now = False
+        email = ""
+        staging = getattr(context.args, "staging", False)
+        if params["enable_site"]:
+            https_now = prompt_yes_no(
+                "\nSet up HTTPS now (certbot + nginx SSL + redirect)?",
+                default=False,
+            )
+            if https_now:
+                email = input("\nLet's Encrypt email: ").strip()
+                if not email:
+                    print("Email is required for HTTPS setup.", file=sys.stderr)
+                    input("\nPress Enter to continue...")
+                    return PageResult.STAY
+                if not staging:
+                    staging = prompt_yes_no(
+                        "Use Let's Encrypt staging (test cert)?",
+                        default=False,
+                    )
+
+                errors, warnings = await precheck_certificate_domain(domain)
+                for message in warnings:
+                    print(f"  warning: {message}")
+                for message in errors:
+                    print(f"  error: {message}", file=sys.stderr)
+                if errors:
+                    if not prompt_yes_no("\nPrecheck errors found. Continue anyway?", default=False):
+                        return PageResult.STAY
+                    params["force"] = True
+                elif warnings:
+                    if not prompt_yes_no("\nContinue with warnings?", default=True):
+                        return PageResult.STAY
+
         print("\nPreview:")
         print(f"  domain: {domain}")
+        print(f"  server_names: {', '.join(server_names)}")
+        print(f"  http_port: {http_port}")
         print(f"  type: {params['site_kind']}")
         if params["site_kind"] == SiteKind.STATIC.value:
             print(f"  root: {params.get('document_root')}")
@@ -733,11 +891,21 @@ class _CreateSiteWizardPage(Page):
         else:
             print(f"  proxy_pass: {params.get('proxy_pass')}")
         print(f"  enable: {'yes' if params['enable_site'] else 'no'}")
+        print(f"  https_now: {'yes' if https_now else 'no'}")
+        if https_now:
+            print(f"  email: {email}")
+            print(f"  staging: {'yes' if staging else 'no'}")
 
         if not prompt_yes_no("\nCreate this site?", default=True):
             return PageResult.STAY
 
-        if await _run_create_site_action(context, params):
+        create_params = {
+            **params,
+            "https_now": https_now,
+            "email": email,
+            "staging": staging,
+        }
+        if await _run_create_site_with_optional_https(context, create_params):
             return PageResult.BACK
         return PageResult.STAY
 

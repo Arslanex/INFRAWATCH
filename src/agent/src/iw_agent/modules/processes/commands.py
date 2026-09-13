@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 
 import psutil
 
+from iw_agent.cli.action_prompts import print_action_result
+from iw_agent.cli.action_runner import run_action_with_prompts
+from iw_agent.cli.interactive.navigator import Navigator, Page, PageContext, PageResult
+from iw_agent.cli.interactive.selector import prompt_choice, prompt_yes_no
 from iw_agent.cli.output import (
     BLUE,
     DIM,
@@ -22,18 +27,28 @@ from iw_agent.cli.output import (
     print_empty,
     print_info_box,
     print_insight,
+    print_menu_item,
+    print_page_divider,
+    print_page_summary,
     print_report,
     print_status_box,
+    prepare_command_view,
     process_load_details,
     status_badge,
 )
-from iw_agent.cli.parser import add_limit_flag
+from iw_agent.cli.parser import add_interactive_flags, add_limit_flag
 from iw_agent.cli.registry import CliCommandSpec
+from iw_agent.core.actions import ActionRequest, ActionResult, ExecutorOptions
+from iw_agent.core.exceptions import ActionCancelledError, ActionDeniedError
 from iw_agent.modules.processes.collector import collect_processes
 from iw_agent.modules.processes.schemas import Process
 
 
 async def run_processes(args: argparse.Namespace) -> None:
+    if getattr(args, "interactive", False):
+        await run_processes_interactive(args)
+        return
+
     processes = await collect_processes(args.limit)
     emit_models(processes, json_output=args.json, plain=args.plain, render=_render_processes)
 
@@ -137,7 +152,176 @@ def _render_processes(processes: list[Process]) -> None:
 
 
 def _configure(parser: argparse.ArgumentParser) -> None:
+    add_interactive_flags(parser)
     add_limit_flag(parser, default=10, help_text="max processes")
+
+
+def _process_list_hint(process: Process) -> str:
+    cpu = format_percent(process.cpu_percent)
+    parts = [cpu, _owner_label(process)]
+    if process.status:
+        parts.append(process.status)
+    return " · ".join(parts)
+
+
+@dataclass(frozen=True)
+class _HubEntry:
+    label: str
+    hint: str = ""
+    action_id: str = ""
+
+
+def _process_params(process: Process) -> dict:
+    return {"pid": process.pid}
+
+
+def _process_hub_menu(process: Process) -> list[_HubEntry]:
+    return [
+        _HubEntry("View details", "CPU, memory, cgroup, command", "view_details"),
+        _HubEntry("Kill process", "send SIGTERM (type YES to confirm)", "kill_process"),
+    ]
+
+
+async def _refresh_processes(context: PageContext) -> None:
+    context.data["processes"] = await collect_processes(context.args.limit)
+
+
+async def _run_process_action(
+    context: PageContext,
+    process: Process,
+    action_id: str,
+    *,
+    params: dict | None = None,
+) -> ActionResult | None:
+    request = ActionRequest(
+        module="processes",
+        action_id=action_id,
+        target_id=str(process.pid),
+        params=params or _process_params(process),
+    )
+    label = f"{process.process_name} (pid {process.pid})"
+    try:
+        return await run_action_with_prompts(
+            request,
+            options=context.data["options"],
+            target_label=label,
+        )
+    except ActionCancelledError:
+        print("\nCancelled.")
+        return None
+    except ActionDeniedError as exc:
+        print(f"\n{exc.message}")
+        return None
+
+
+async def run_processes_interactive(args: argparse.Namespace) -> None:
+    prepare_command_view(plain=args.plain)
+    processes = await collect_processes(args.limit)
+    options = ExecutorOptions(dry_run=getattr(args, "dry_run", False))
+    context = PageContext(
+        args=args,
+        data={"processes": processes, "options": options},
+    )
+    await Navigator(context).run(_InteractiveProcessListPage())
+
+
+class _InteractiveProcessListPage(Page):
+    @property
+    def title(self) -> str:
+        return "Processes"
+
+    @property
+    def subtitle(self) -> str:
+        return "processes"
+
+    def render(self, context: PageContext) -> None:
+        processes: list[Process] = context.data["processes"]
+        print_page_divider()
+        if not processes:
+            print_page_summary("No processes could be read. Try sudo iw processes -i.")
+            return
+
+        for index, process in enumerate(processes, start=1):
+            print_menu_item(
+                index,
+                f"{process.process_name} (pid {process.pid})",
+                _process_list_hint(process),
+            )
+
+    async def handle(self, context: PageContext) -> PageResult | Page:
+        processes: list[Process] = context.data["processes"]
+        if not processes:
+            return PageResult.EXIT
+
+        choice = prompt_choice(max_value=len(processes), allow_back=False, allow_exit=True)
+        if choice is None:
+            return PageResult.EXIT
+        return _InteractiveProcessDetailPage(processes[choice - 1])
+
+
+class _InteractiveProcessDetailPage(Page):
+    def __init__(self, process: Process) -> None:
+        self._process = process
+        self._menu = _process_hub_menu(process)
+
+    @property
+    def title(self) -> str:
+        return f"{self._process.process_name} (pid {self._process.pid})"
+
+    @property
+    def subtitle(self) -> str:
+        return "processes"
+
+    def render(self, context: PageContext) -> None:
+        system_ram_total = psutil.virtual_memory().total
+        print_page_divider()
+        print_page_summary(_process_list_hint(self._process))
+        print(f"   {format_meter('CPU', self._process.cpu_percent or 0.0)}")
+        print(f"   {format_memory_meter(self._process.memory_rss_bytes, system_ram_total)}")
+        if self._process.command_line:
+            command = self._process.command_line
+            if len(command) > 72:
+                command = f"{command[:69]}..."
+            print(f"   cmd: {command}")
+        print_page_divider()
+        for index, entry in enumerate(self._menu, start=1):
+            print_menu_item(index, entry.label, entry.hint)
+
+    async def handle(self, context: PageContext) -> PageResult | Page:
+        choice = prompt_choice(max_value=len(self._menu), allow_back=True, allow_exit=True)
+        if choice is None:
+            return PageResult.EXIT
+        if choice == -1:
+            return PageResult.BACK
+
+        entry = self._menu[choice - 1]
+        params = _process_params(self._process)
+
+        if entry.action_id == "kill_process":
+            if prompt_yes_no("\nSend SIGKILL if SIGTERM fails?", default=False):
+                params["signal"] = "KILL"
+
+        result = await _run_process_action(
+            context,
+            self._process,
+            entry.action_id,
+            params=params,
+        )
+        if result is None:
+            input("\nPress Enter to continue...")
+            return PageResult.STAY
+
+        print()
+        if entry.action_id == "view_details":
+            print(result.message)
+        else:
+            print_action_result(result)
+        input("\nPress Enter to continue...")
+
+        if result.ok and entry.action_id == "kill_process":
+            await _refresh_processes(context)
+            return PageResult.BACK
+        return PageResult.STAY
 
 
 COMMAND_SPECS = [

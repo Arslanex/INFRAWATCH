@@ -8,7 +8,7 @@ from crontab import CronTab
 from iw_agent.core._thread import read
 from iw_agent.core.exceptions import CronCrontabUnreadableError
 from iw_agent.core.logger import logger
-from iw_agent.modules.cron.schemas import CronJob
+from iw_agent.modules.cron.schemas import CronJob, compute_job_id
 
 SYSTEM_CRONTAB_FILES = ("/etc/crontab",)
 SYSTEM_CRONTAB_DROPINS_DIR = "/etc/cron.d"
@@ -44,7 +44,14 @@ def _collect_user_crontab_jobs() -> list[CronJob]:
             )
             continue
 
-        jobs.extend(_jobs_from_crontab(crontab, default_owner=username))
+        jobs.extend(
+            _jobs_from_crontab(
+                crontab,
+                default_owner=username,
+                source="user",
+                writable=True,
+            )
+        )
 
     return jobs
 
@@ -80,32 +87,56 @@ def _collect_system_crontab_jobs() -> list[CronJob]:
             )
             continue
 
-        jobs.extend(_jobs_from_crontab(crontab, default_owner="root"))
+        jobs.extend(
+            _jobs_from_crontab(
+                crontab,
+                default_owner="root",
+                source="system",
+                writable=False,
+            )
+        )
 
     return jobs
 
 
-def _jobs_from_crontab(crontab: CronTab, default_owner: str) -> list[CronJob]:
+def _jobs_from_crontab(
+    crontab: CronTab,
+    default_owner: str,
+    *,
+    source: str,
+    writable: bool,
+) -> list[CronJob]:
     jobs: list[CronJob] = []
 
     for entry in crontab:
-        if not entry.is_valid() or not entry.is_enabled():
+        if not entry.is_valid():
             continue
 
         command = str(entry.command or "").strip()
         if not command:
             continue
 
+        owner = str(entry.user or default_owner)
+        cron_expression = str(entry.slices)
         jobs.append(
             CronJob(
-                owner=str(entry.user or default_owner),
-                cron_expression=str(entry.slices),
+                job_id=compute_job_id(owner, cron_expression, command),
+                owner=owner,
+                cron_expression=cron_expression,
                 command=command,
+                enabled=entry.is_enabled(),
+                writable=writable,
+                source=source,  # type: ignore[arg-type]
                 output_log_path=_extract_output_log_path(command),
             )
         )
 
     return jobs
+
+
+async def find_cron_job(job_id: str) -> CronJob | None:
+    jobs = await collect_cron_jobs()
+    return next((job for job in jobs if job.job_id == job_id), None)
 
 
 def _extract_output_log_path(command: str) -> str | None:

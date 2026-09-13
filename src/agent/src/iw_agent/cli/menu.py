@@ -7,6 +7,8 @@ from iw_agent.cli.output import clear_screen, print_banner
 from iw_agent.cli.registry import collect_command_specs
 from iw_agent.cli.runner import run_async
 
+_MANAGE_COMMANDS = frozenset({"nginx", "cron", "containers", "processes", "certs"})
+
 
 def run_menu() -> int:
     return run_async(_interactive_menu)
@@ -30,17 +32,25 @@ async def _interactive_menu() -> None:
 
         selected = specs[choice - 1]
         args = _default_args()
-        if selected.name == "nginx":
-            args = _nginx_menu_args(args)
+        if selected.name in _MANAGE_COMMANDS:
+            args = _command_menu_args(selected.name, args)
             if args is None:
                 continue
         await selected.handler(args)
 
 
-def _nginx_menu_args(args: argparse.Namespace) -> argparse.Namespace | None:
-    print("\nnginx:")
-    print("  1. view sites (read-only)")
-    print("  2. manage sites (certbot, enable, reload)")
+def _command_menu_args(name: str, args: argparse.Namespace) -> argparse.Namespace | None:
+    labels = {
+        "nginx": ("view sites", "manage sites (certbot, enable, reload)"),
+        "cron": ("view jobs", "manage jobs (run, enable, disable)"),
+        "containers": ("view containers", "manage containers (start, stop, restart)"),
+        "processes": ("view processes", "manage processes (details, kill)"),
+        "certs": ("view certificates", "manage certificates (renew, obtain)"),
+    }
+    view_label, manage_label = labels[name]
+    print(f"\n{name}:")
+    print(f"  1. {view_label} (read-only)")
+    print(f"  2. {manage_label}")
     while True:
         raw = input("\n> ").strip()
         if raw in {"q", "quit", "exit", "0"}:
@@ -49,6 +59,8 @@ def _nginx_menu_args(args: argparse.Namespace) -> argparse.Namespace | None:
             return args
         if raw == "2":
             args.interactive = True
+            if name == "containers":
+                args.limit = 200
             return args
         print("Enter 1, 2, or q.", file=sys.stderr)
 

@@ -28,11 +28,17 @@ class ModuleExecutor(Protocol):
 
 
 def collect_module_executors() -> list[ModuleExecutor]:
+    from iw_agent.modules.cron.executor import CronExecutor
+    from iw_agent.modules.docker.executor import DockerExecutor
     from iw_agent.modules.ngnix.executor import NginxExecutor
+    from iw_agent.modules.processes.executor import ProcessExecutor
     from iw_agent.modules.ssl.executor import SslExecutor
 
     return [
+        CronExecutor(),
+        DockerExecutor(),
         NginxExecutor(),
+        ProcessExecutor(),
         SslExecutor(),
     ]
 

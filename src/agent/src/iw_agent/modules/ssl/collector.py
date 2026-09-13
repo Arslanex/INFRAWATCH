@@ -46,6 +46,24 @@ def _collect_certificates(
     return certificates
 
 
+def cert_name_from_path(cert_path: str) -> str:
+    return Path(cert_path).parent.name
+
+
+async def find_certificate(
+    cert_path: str,
+    *,
+    certbot_live_dir: str = DEFAULT_CERTBOT_LIVE_DIR,
+    nginx_cert_paths: list[str] | None = None,
+) -> Certificate | None:
+    certificates = await collect_certificates(
+        certbot_live_dir=certbot_live_dir,
+        nginx_cert_paths=[cert_path, *(nginx_cert_paths or [])],
+    )
+    normalized = cert_path.strip()
+    return next((cert for cert in certificates if cert.cert_path == normalized), None)
+
+
 def _certificate_candidates(certbot_live_dir: str, nginx_cert_paths: list[str]):
     live_directory = Path(certbot_live_dir)
     if live_directory.is_dir():
