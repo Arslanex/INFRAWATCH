@@ -92,6 +92,20 @@ def print_section(step: int, title: str, description: str) -> None:
     print()
 
 
+def print_spacer() -> None:
+    print()
+
+
+def print_panel(title: str, *, hint: str | None = None) -> None:
+    print()
+    print(f"   {_c(BOLD)}{title}{_reset()}", end="")
+    if hint:
+        print(f"  {_c(DIM)}{hint}{_reset()}", end="")
+    print()
+    print(f"   {_c(DIM)}{'─' * 46}{_reset()}")
+    print()
+
+
 def print_labeled_rows(rows: list[tuple[str, str]]) -> None:
     if not rows:
         return
@@ -101,6 +115,15 @@ def print_labeled_rows(rows: list[tuple[str, str]]) -> None:
             f"   {_c(BOLD)}{_c(CYAN)}{label:<{width}}{_reset()}  {value}"
         )
     print()
+
+
+def print_field_rows(
+    rows: list[tuple[str, str]],
+    *,
+    label_width: int = 12,
+) -> None:
+    for label, value in rows:
+        print(f"   {_c(DIM)}{label:<{label_width}}{_reset()} {value}")
 
 
 def print_labeled_block(label: str, lines: list[str], *, label_width: int | None = None) -> None:
@@ -247,10 +270,15 @@ def _bar_chars() -> tuple[str, str, str]:
     return "█", "▄", "░"
 
 
-def format_horizontal_bar(percent: float, *, width: int = 28) -> str:
+def format_horizontal_bar(
+    percent: float,
+    *,
+    width: int = 28,
+    severity: bool = True,
+) -> str:
     filled = min(width, max(0, int(round(width * percent / 100))))
     full, _, empty = _bar_chars()
-    color = _usage_color(percent)
+    color = _usage_color(percent) if severity else CYAN
     return (
         f"{_c(color)}{full * filled}{_reset()}"
         f"{_c(DIM)}{empty * (width - filled)}{_reset()}"
@@ -265,95 +293,117 @@ def format_cpu_line(percent: float | None, cores: int | None) -> str:
     return f"{_c(color)}{format_percent(percent)}{_reset()} across {core_text}"
 
 
-def format_cpu_core_grid(percents: list[float], *, bar_height: int = 6) -> list[str]:
+def format_usage_row(
+    label: str,
+    percent: float,
+    detail: str,
+    *,
+    width: int = 30,
+    label_width: int = 10,
+) -> str:
+    bar = format_horizontal_bar(percent, width=width)
+    return (
+        f"   {label:<{label_width}} [{bar}]"
+        f"  {format_percent(percent, colorize=True)}"
+        f"  {_c(DIM)}{detail}{_reset()}"
+    )
+
+
+def format_cpu_cores_horizontal(
+    percents: list[float],
+    *,
+    width: int = 30,
+) -> list[str]:
     if not percents:
-        return ["unknown"]
-
-    full, partial, empty = _bar_chars()
-    gap = "   "
-    lines: list[str] = []
-
-    lines.append(f"{_c(DIM)}{gap.join(f'C{index}' for index in range(len(percents)))}{_reset()}")
-
-    for row in range(bar_height, 0, -1):
-        threshold_low = ((row - 1) / bar_height) * 100
-        threshold_high = (row / bar_height) * 100
-        cells: list[str] = []
-        for percent in percents:
-            if percent >= threshold_high:
-                cells.append(f"{_c(_usage_color(percent))}{full}{_reset()}")
-            elif percent > threshold_low:
-                cells.append(f"{_c(_usage_color(percent))}{partial}{_reset()}")
-            else:
-                cells.append(f"{_c(DIM)}{empty}{_reset()}")
-        lines.append(gap.join(cells))
-
-    lines.append(gap.join(format_percent(percent, colorize=True) for percent in percents))
+        return ["   unknown"]
 
     average = sum(percents) / len(percents)
-    lines.append(
-        f"{_c(DIM)}average{_reset()} {format_percent(average, colorize=True)}"
-        f" {_c(DIM)}({len(percents)} cores){_reset()}"
-    )
+    lines = [
+        format_usage_row(
+            "Overall",
+            average,
+            f"{len(percents)} cores",
+            width=width,
+        )
+    ]
+    for index, percent in enumerate(percents):
+        lines.append(
+            format_usage_row(
+                f"Core {index}",
+                percent,
+                "",
+                width=width,
+            )
+        )
     return lines
 
 
-def format_memory_bar(used: int | None, total: int | None, *, width: int = 28) -> list[str]:
+def format_memory_usage_row(
+    used: int | None,
+    total: int | None,
+    *,
+    width: int = 30,
+) -> str:
     if used is None or total is None or total <= 0:
-        return ["unknown"]
-
+        return "   unknown"
     percent = (used / total) * 100
-    bar = format_horizontal_bar(percent, width=width)
-    return [
-        f"{format_bytes(used)} of {format_bytes(total)} ({percent:.0f}% full)",
-        f"[{bar}]",
-    ]
+    return format_usage_row(
+        "RAM",
+        percent,
+        f"{format_bytes(used)} / {format_bytes(total)}",
+        width=width,
+    )
 
 
-def format_load_panel(
+def format_load_usage_row(
     load_1: float | None,
     load_5: float | None,
     load_15: float | None,
     cores: int | None,
     *,
-    width: int = 28,
-) -> list[str]:
+    width: int = 30,
+) -> str:
     if load_1 is None:
-        return ["unknown"]
+        return "   unknown"
 
-    lines = [format_load_line(load_1, load_5, load_15)]
-    if cores and cores > 0:
-        percent = min(100.0, (load_1 / cores) * 100)
-        lines.append(f"[{format_horizontal_bar(percent, width=width)}]")
-    return lines
+    load_5_text = f"{load_5:.2f}" if load_5 is not None else "?"
+    load_15_text = f"{load_15:.2f}" if load_15 is not None else "?"
+    detail = f"now {load_1:.2f} · 5m {load_5_text} · 15m {load_15_text}"
+    percent = min(100.0, (load_1 / cores) * 100) if cores and cores > 0 else min(100.0, load_1 * 100)
+    return format_usage_row("Load", percent, detail, width=width)
 
 
-def format_disk_bars(
+def format_disk_usage_rows(
     partitions: list[tuple[str, int, int]],
     *,
-    width: int = 22,
+    width: int = 30,
+    label_width: int = 10,
 ) -> list[str]:
     if not partitions:
-        return ["unknown"]
+        return ["   unknown"]
 
-    readable = [
-        (mount, used, total)
-        for mount, used, total in partitions
-        if total > 0
-    ]
-    if not readable:
-        return ["unknown"]
-
-    label_width = max(len(mount) for mount, _, _ in readable)
     lines: list[str] = []
-    for mount, used, total in readable:
+    for mount, used, total in partitions:
+        if total <= 0:
+            continue
         percent = (used / total) * 100
-        bar = format_horizontal_bar(percent, width=width)
+        label = mount if len(mount) <= label_width else mount[: label_width - 1] + "…"
         lines.append(
-            f"{mount:<{label_width}}  [{bar}]  {percent:3.0f}%"
-            f"  {_c(DIM)}{format_bytes(used)}/{format_bytes(total)}{_reset()}"
+            format_usage_row(
+                label,
+                percent,
+                f"{format_bytes(used)} / {format_bytes(total)}",
+                width=width,
+                label_width=label_width,
+            )
         )
-    return lines
+    return lines or ["   unknown"]
+
+
+def print_usage_lines(lines: list[str]) -> None:
+    for line in lines:
+        print(line)
+    print()
 
 
 def format_load_line(load_1: float | None, load_5: float | None, load_15: float | None) -> str:
@@ -477,33 +527,29 @@ def cert_expiry_details(not_after: datetime | None) -> tuple[str, str, float, st
     date_text = expiry.strftime("%Y-%m-%d")
 
     if days < 0:
-        icon = "X" if _plain_mode else "❌"
         return (
-            f"{_c(RED)}{icon} EXPIRED{_reset()}",
+            f"{_c(RED)}EXPIRED{_reset()}",
             f"expired on {date_text} ({abs(days)} days ago)",
             0.0,
             "bad",
         )
     if days <= 14:
-        icon = "!" if _plain_mode else "⚠"
         return (
-            f"{_c(YELLOW)}{icon} RENEW SOON{_reset()}",
+            f"{_c(YELLOW)}RENEW SOON{_reset()}",
             f"valid until {date_text} ({days} days left)",
             max(5.0, (days / 90) * 100),
             "warn",
         )
     if days <= 30:
-        icon = "~" if _plain_mode else "⏳"
         return (
-            f"{_c(YELLOW)}{icon} EXPIRING{_reset()}",
+            f"{_c(YELLOW)}EXPIRING{_reset()}",
             f"valid until {date_text} ({days} days left)",
             (days / 90) * 100,
             "warn",
         )
 
-    icon = "OK" if _plain_mode else "🔒"
     return (
-        f"{_c(GREEN)}{icon} VALID{_reset()}",
+        f"{_c(GREEN)}VALID{_reset()}",
         f"valid until {date_text} ({days} days left)",
         min(100.0, (days / 90) * 100),
         "ok",
@@ -530,17 +576,20 @@ def format_meter(label: str, percent: float, *, width: int = 22) -> str:
 
 def format_memory_meter(
     memory_bytes: int | None,
-    max_memory: int,
+    system_total_bytes: int,
     *,
     width: int = 22,
 ) -> str:
-    if not memory_bytes or max_memory <= 0:
+    if memory_bytes is None or system_total_bytes <= 0:
         bar = format_horizontal_bar(0.0, width=width)
         return f"RAM  [{bar}] unknown"
 
-    percent = min(100.0, (memory_bytes / max_memory) * 100)
+    percent = min(100.0, (memory_bytes / system_total_bytes) * 100)
     bar = format_horizontal_bar(percent, width=width)
-    return f"RAM  [{bar}] {format_bytes(memory_bytes)}"
+    return (
+        f"RAM  [{bar}] {format_bytes(memory_bytes)}"
+        f"  {_c(DIM)}({percent:.1f}% of server RAM){_reset()}"
+    )
 
 
 def format_cron_schedule_hint(expression: str) -> str:

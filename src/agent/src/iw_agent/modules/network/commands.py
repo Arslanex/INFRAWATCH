@@ -25,7 +25,8 @@ PORT_COLUMNS = [
     ("Port", "door number other computers use to connect"),
     ("Type", "usually tcp or udp"),
     ("Listening on", "network address that accepts connections"),
-    ("Program", "software using this port"),
+    ("Program", "process holding the socket"),
+    ("Runs as", "docker project, systemd service, or real owner"),
 ]
 
 CONNECTION_COLUMNS = [
@@ -117,6 +118,12 @@ def _connections_summary(connections: list[OutboundConnection]) -> str:
     return " ".join(parts)
 
 
+def _port_owner_label(port: ListeningPort) -> str:
+    if port.owner_label:
+        return port.owner_label
+    return format_optional(port.process_name, fallback="—")
+
+
 def _render_ports(ports: list[ListeningPort], *, step: int = 1, standalone: bool = False) -> None:
     if standalone:
         print_report(
@@ -141,6 +148,7 @@ def _render_ports(ports: list[ListeningPort], *, step: int = 1, standalone: bool
                 port.protocol.upper(),
                 port.listen_address,
                 format_optional(port.process_name, fallback="unknown program"),
+                _port_owner_label(port),
             ]
             for port in sorted(ports, key=lambda row: (row.protocol, row.port_number))
         ],

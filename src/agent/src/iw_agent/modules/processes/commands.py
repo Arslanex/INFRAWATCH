@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 
+import psutil
+
 from iw_agent.cli.output import (
     DIM,
     _c,
@@ -48,13 +50,13 @@ def _owner_label(process: Process) -> str:
     return format_optional(process.cgroup_owner, fallback="this server")
 
 
-def _render_process_card(process: Process, rank: int, max_memory: int) -> None:
+def _render_process_card(process: Process, rank: int, system_ram_total: int) -> None:
     load_badge, tone = process_load_details(process.cpu_percent)
     badge = f"#{rank} {load_badge}"
 
     lines = [
         format_meter("CPU", process.cpu_percent or 0.0),
-        format_memory_meter(process.memory_rss_bytes, max_memory),
+        format_memory_meter(process.memory_rss_bytes, system_ram_total),
         f"{_c(DIM)}runs as:{_reset()} {_owner_label(process)}",
         f"{_c(DIM)}pid {process.pid}{_reset()}",
     ]
@@ -87,11 +89,15 @@ def _render_processes(processes: list[Process]) -> None:
         return
 
     print_insight(_processes_summary(processes))
-    print_section(1, "Top programs", "Higher CPU bars mean the program is busier right now.")
+    print_section(
+        1,
+        "Top programs",
+        "Bars use real usage: CPU 0–100%, RAM as % of total server memory.",
+    )
 
-    max_memory = max((process.memory_rss_bytes or 0) for process in processes) or 1
+    system_ram_total = psutil.virtual_memory().total
     for rank, process in enumerate(processes, start=1):
-        _render_process_card(process, rank, max_memory)
+        _render_process_card(process, rank, system_ram_total)
 
 
 def _configure(parser: argparse.ArgumentParser) -> None:

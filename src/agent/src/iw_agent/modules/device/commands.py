@@ -7,18 +7,17 @@ from iw_agent.cli.output import (
     _c,
     _reset,
     emit_models,
-    format_cpu_core_grid,
-    format_disk_bars,
-    format_load_panel,
-    format_memory_bar,
+    format_cpu_cores_horizontal,
+    format_disk_usage_rows,
+    format_load_usage_row,
+    format_memory_usage_row,
     format_optional,
     format_bytes,
     print_empty,
     print_insight,
-    print_labeled_block,
-    print_labeled_rows,
+    print_panel,
     print_report,
-    print_section,
+    print_usage_lines,
 )
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.modules.device.collector import (
@@ -26,9 +25,7 @@ from iw_agent.modules.device.collector import (
     collect_device_snapshot,
     collect_disk_volumes,
 )
-from iw_agent.modules.device.schemas import DeviceMetrics, DeviceSnapshot, DiskVolume
-
-_WORKLOAD_LABEL_WIDTH = 17
+from iw_agent.modules.device.schemas import DeviceMetrics, DeviceSnapshot, DeviceSystem, DiskVolume
 
 
 async def run_device(args: argparse.Namespace) -> None:
@@ -42,7 +39,7 @@ async def run_metrics(args: argparse.Namespace) -> None:
         metrics,
         json_output=args.json,
         plain=args.plain,
-        render=lambda data: _render_metrics(data, standalone=True, dashboard=True),
+        render=lambda data: _render_metrics(data, standalone=True),
     )
 
 
@@ -52,18 +49,12 @@ async def run_disks(args: argparse.Namespace) -> None:
         disks,
         json_output=args.json,
         plain=args.plain,
-        render=lambda data: _render_disks(data, standalone=True, step=1),
+        render=lambda data: _render_disks(data, standalone=True),
     )
 
 
-def _device_summary(snapshot: DeviceSnapshot) -> str:
-    system = snapshot.system
-    metrics = snapshot.metrics
-    parts = [
-        f"{system.hostname} runs {system.operating_system}"
-        f"{f' {system.os_release}' if system.os_release else ''}."
-    ]
-
+def _workload_summary(metrics: DeviceMetrics) -> str:
+    parts: list[str] = []
     if metrics.cpu_percent is not None:
         parts.append(f"CPU {metrics.cpu_percent:.0f}%")
     if metrics.memory_used_bytes is not None and metrics.memory_total_bytes:
@@ -71,19 +62,11 @@ def _device_summary(snapshot: DeviceSnapshot) -> str:
         parts.append(f"RAM {mem_pct:.0f}%")
     if metrics.load_1 is not None:
         parts.append(f"load {metrics.load_1:.2f}")
+    return " · ".join(parts) if parts else "Workload unknown"
 
-    return " · ".join(parts)
 
-
-def _metrics_summary(metrics: DeviceMetrics) -> str:
-    cpu = f"{metrics.cpu_percent:.0f}%" if metrics.cpu_percent is not None else "unknown"
-    if metrics.memory_used_bytes is not None and metrics.memory_total_bytes:
-        mem_pct = (metrics.memory_used_bytes / metrics.memory_total_bytes) * 100
-        memory = f"{mem_pct:.0f}% RAM used"
-    else:
-        memory = "memory unknown"
-    load = f"load {metrics.load_1:.2f}" if metrics.load_1 is not None else "load unknown"
-    return f"CPU at {cpu}, {memory}, {load}."
+def _device_summary(snapshot: DeviceSnapshot) -> str:
+    return f"{snapshot.system.hostname} · {_workload_summary(snapshot.metrics)}"
 
 
 def _disks_summary(disks: list[DiskVolume]) -> str:
@@ -96,8 +79,8 @@ def _disks_summary(disks: list[DiskVolume]) -> str:
     ]
     if full:
         names = ", ".join(disk.mount_point for disk in full[:3])
-        return f"Found {len(disks)} disk(s). Warning: {names} is almost full."
-    return f"Found {len(disks)} disk partition(s); none are critically full."
+        return f"{len(disks)} disk(s) · warning: {names} almost full"
+    return f"{len(disks)} disk(s) · all OK"
 
 
 def _cpu_percents(metrics: DeviceMetrics) -> list[float]:
@@ -107,94 +90,85 @@ def _cpu_percents(metrics: DeviceMetrics) -> list[float]:
     return per_core
 
 
-def _render_device(snapshot: DeviceSnapshot) -> None:
-    system = snapshot.system
-    metrics = snapshot.metrics
-
-    print_report(
-        "Server overview",
-        "A simple health check of this computer.",
+def _render_system_info(system: DeviceSystem) -> None:
+    print_panel("System", hint="identity")
+    print(f"   {'Host':<10} {system.hostname}")
+    print(
+        f"   {'OS':<10} {system.operating_system}"
+        f" {_c(DIM)}({format_optional(system.machine)}){_reset()}"
     )
-    print_insight(_device_summary(snapshot))
-
-    print_section(1, "About this computer", "Who this server is and when it last restarted.")
-    print_labeled_rows(
-        [
-            ("Computer name", system.hostname),
-            ("Operating system", f"{system.operating_system} ({format_optional(system.machine)})"),
-            ("Last restart", format_optional(system.boot_time)),
-        ]
-    )
-
-    _render_metrics(metrics, step=2, dashboard=True)
-    _render_disks(snapshot.disks, step=3)
+    print(f"   {'Reboot':<10} {format_optional(system.boot_time)}")
+    print()
 
 
-def _render_metrics(
-    metrics: DeviceMetrics,
-    *,
-    step: int = 1,
-    standalone: bool = False,
-    dashboard: bool = False,
-) -> None:
-    if standalone:
-        print_report(
-            "Server workload",
-            "How busy the processor, memory, and system are right now.",
-        )
-        print_insight(_metrics_summary(metrics))
+def _render_workload(metrics: DeviceMetrics) -> None:
+    print_panel("CPU", hint="green · yellow · red by usage")
+    print_usage_lines(format_cpu_cores_horizontal(_cpu_percents(metrics)))
 
-    print_section(step, "Current workload", "How busy the server is right now.")
+    print_panel("Memory", hint="RAM used right now")
+    print(format_memory_usage_row(metrics.memory_used_bytes, metrics.memory_total_bytes))
+    print()
 
-    label_width = _WORKLOAD_LABEL_WIDTH if dashboard else None
-    per_core = _cpu_percents(metrics)
-
-    print_labeled_block(
-        "Processor (CPU)",
-        format_cpu_core_grid(per_core),
-        label_width=label_width,
-    )
-    print_labeled_block(
-        "Memory (RAM)",
-        format_memory_bar(metrics.memory_used_bytes, metrics.memory_total_bytes),
-        label_width=label_width,
-    )
-    print_labeled_block(
-        "System load",
-        format_load_panel(
+    print_panel("Load", hint="how busy the queue is")
+    print(
+        format_load_usage_row(
             metrics.load_1,
             metrics.load_5,
             metrics.load_15,
             metrics.cpu_count_logical,
-        ),
-        label_width=label_width,
+        )
     )
-    print_labeled_block(
-        "Network traffic",
-        [
-            f"received {format_bytes(metrics.net_rx_bytes)}, "
-            f"sent {format_bytes(metrics.net_tx_bytes)}"
-            f"  {_c(DIM)}(total since boot){_reset()}",
-        ],
-        label_width=label_width,
+    print()
+
+    print_panel("Network", hint="since last boot")
+    print(
+        f"   {'Traffic':<10} received {format_bytes(metrics.net_rx_bytes)}"
+        f" · sent {format_bytes(metrics.net_tx_bytes)}"
     )
+    print()
+
+
+def _render_device(snapshot: DeviceSnapshot) -> None:
+    system = snapshot.system
+
+    print_report(
+        "Server overview",
+        f"{system.hostname} · {system.operating_system}",
+    )
+    print_insight(_device_summary(snapshot))
+
+    _render_system_info(system)
+    _render_workload(snapshot.metrics)
+    _render_disks(snapshot.disks, embedded=True)
+
+
+def _render_metrics(metrics: DeviceMetrics, *, standalone: bool = False) -> None:
+    if standalone:
+        print_report(
+            "Server workload",
+            "Processor, memory, and system load.",
+        )
+        print_insight(_workload_summary(metrics))
+
+    _render_workload(metrics)
 
 
 def _render_disks(
     disks: list[DiskVolume],
     *,
-    step: int = 1,
     standalone: bool = False,
+    embedded: bool = False,
 ) -> None:
     if standalone:
         print_report(
             "Storage space",
-            "How much room is left on each disk partition.",
+            "Disk partitions on this server.",
         )
         print_insight(_disks_summary(disks))
 
-    print_section(step, "Storage space", "How full each disk partition is.")
     if not disks:
+        if not embedded:
+            print_panel("Disks", hint="storage partitions")
         print_empty(
             "no disks found",
             "The agent could not read disk usage.",
@@ -202,11 +176,12 @@ def _render_disks(
         )
         return
 
-    print_labeled_block(
-        "Disk partitions",
-        format_disk_bars(
-            [(disk.mount_point, disk.used_bytes, disk.total_bytes) for disk in disks]
-        ),
+    print_panel("Disks", hint="green · yellow · red by fill level")
+    print_usage_lines(
+        format_disk_usage_rows(
+            [(disk.mount_point, disk.used_bytes, disk.total_bytes) for disk in disks],
+            label_width=12,
+        )
     )
 
 

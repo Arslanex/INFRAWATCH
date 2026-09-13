@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 
 from iw_agent.cli.output import (
+    BOLD,
     DIM,
     _c,
     _reset,
@@ -11,15 +12,18 @@ from iw_agent.cli.output import (
     emit_models,
     format_horizontal_bar,
     format_optional,
+    format_strikethrough,
     print_empty,
-    print_info_card,
+    print_field_rows,
     print_insight,
+    print_panel,
     print_report,
-    print_section,
 )
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.modules.ssl.collector import DEFAULT_CERTBOT_LIVE_DIR, collect_certificates
 from iw_agent.modules.ssl.schemas import Certificate
+
+_FIELD_WIDTH = 11
 
 
 async def run_certs(args: argparse.Namespace) -> None:
@@ -52,37 +56,81 @@ def _certs_summary(certificates: list[Certificate]) -> str:
         else:
             valid += 1
 
-    return (
-        f"Found {len(certificates)} certificate(s): "
-        f"{valid} valid, {expiring} expiring soon, {expired} expired."
-    )
+    return f"{len(certificates)} cert(s): {valid} valid, {expiring} expiring, {expired} expired."
 
 
-def _render_cert_card(certificate: Certificate) -> None:
-    badge, status_line, bar_percent, tone = cert_expiry_details(certificate.not_after)
-    bar = format_horizontal_bar(bar_percent, width=24)
+def _why_field(tone: str) -> tuple[str, str]:
+    if tone == "bad":
+        return ("Why", "HTTPS visitors will see security warnings")
+    if tone == "warn":
+        return ("Why", "renew before expiry to avoid downtime")
+    if tone == "ok":
+        return ("Why", "protects HTTPS traffic for this domain")
+    return ("Why", "expiry date could not be read from file")
 
-    lines = [
-        status_line,
-        f"[{bar}]",
-        f"{_c(DIM)}issuer:{_reset()} {format_optional(certificate.issuer, fallback='unknown')}",
-        f"{_c(DIM)}source:{_reset()} {certificate.source}",
-        f"{_c(DIM)}file:{_reset()} {certificate.cert_path}",
+
+def _render_certificate(certificate: Certificate) -> None:
+    status_label, expiry_text, bar_percent, tone = cert_expiry_details(certificate.not_after)
+    bar = format_horizontal_bar(bar_percent, width=28)
+
+    title = certificate.domain
+    if tone == "bad":
+        title = format_strikethrough(title)
+
+    print(f"   {_c(BOLD)}{title}{_reset()}")
+    print(f"   {'-' * 48}")
+
+    rows = [
+        ("Status", status_label),
+        _why_field(tone),
+        ("Expires", expiry_text),
+        ("Time left", f"[{bar}]  {_c(DIM)}({bar_percent:.0f}% of 90-day window){_reset()}"),
+        ("Issuer", format_optional(certificate.issuer, fallback="unknown")),
+        ("Source", certificate.source),
+        ("File", certificate.cert_path),
     ]
+    print_field_rows(rows, label_width=_FIELD_WIDTH)
+    print()
 
-    print_info_card(
-        badge=badge,
-        title=certificate.domain,
-        lines=lines,
-        tone=tone,
-        strike_title=tone == "bad",
-    )
+
+def _group_certificates(
+    certificates: list[Certificate],
+) -> list[tuple[str, str, list[Certificate]]]:
+    now = datetime.now(timezone.utc)
+    expired: list[Certificate] = []
+    expiring: list[Certificate] = []
+    valid: list[Certificate] = []
+    unknown: list[Certificate] = []
+
+    for certificate in certificates:
+        if certificate.not_after is None:
+            unknown.append(certificate)
+            continue
+        expiry = (
+            certificate.not_after
+            if certificate.not_after.tzinfo
+            else certificate.not_after.replace(tzinfo=timezone.utc)
+        )
+        days = (expiry - now).days
+        if days < 0:
+            expired.append(certificate)
+        elif days <= 30:
+            expiring.append(certificate)
+        else:
+            valid.append(certificate)
+
+    return [
+        ("Expired", "no longer valid — renew immediately", expired),
+        ("Expiring soon", "renew within the next 30 days", expiring),
+        ("Valid", "still protecting HTTPS", valid),
+        ("Unknown", "expiry date missing", unknown),
+    ]
 
 
 def _render_certs(certificates: list[Certificate]) -> None:
     print_report(
         "SSL certificates",
-        "Security certificates used for HTTPS on websites.",
+        "Which HTTPS certificates exist, when they expire, and where they live.",
     )
     if not certificates:
         print_empty(
@@ -94,43 +142,25 @@ def _render_certs(certificates: list[Certificate]) -> None:
 
     print_insight(_certs_summary(certificates))
 
-    expired = []
-    expiring = []
-    valid = []
-    unknown = []
+    print_panel("How to read", hint="field guide")
+    print_field_rows(
+        [
+            ("Status", "VALID / EXPIRING / RENEW SOON / EXPIRED"),
+            ("Expires", "last day the certificate works"),
+            ("Time left", "bar shows remaining time (90-day scale)"),
+            ("Source", "certbot, nginx path, or other"),
+            ("File", "certificate path on this server"),
+        ],
+        label_width=_FIELD_WIDTH,
+    )
+    print()
 
-    for certificate in certificates:
-        if certificate.not_after is None:
-            unknown.append(certificate)
-            continue
-        expiry = (
-            certificate.not_after
-            if certificate.not_after.tzinfo
-            else certificate.not_after.replace(tzinfo=timezone.utc)
-        )
-        days = (expiry - datetime.now(timezone.utc)).days
-        if days < 0:
-            expired.append(certificate)
-        elif days <= 30:
-            expiring.append(certificate)
-        else:
-            valid.append(certificate)
-
-    step = 1
-    groups = [
-        (expired, "Expired certificates", "These no longer protect HTTPS traffic."),
-        (expiring, "Expiring soon", "Renew these before the expiry date."),
-        (valid, "Valid certificates", "These certificates are still good."),
-        (unknown, "Unknown expiry", "Could not read the expiry date."),
-    ]
-
-    for group, title, description in groups:
+    for panel_title, panel_hint, group in _group_certificates(certificates):
         if not group:
             continue
-        print_section(step, title, description)
-        step += 1
+        print_panel(panel_title, hint=panel_hint)
         for certificate in group:
-            _render_cert_card(certificate)
+            _render_certificate(certificate)
 
 
 def _configure(parser: argparse.ArgumentParser) -> None:

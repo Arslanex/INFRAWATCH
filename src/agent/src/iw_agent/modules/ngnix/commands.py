@@ -3,25 +3,27 @@ from __future__ import annotations
 import argparse
 
 from iw_agent.cli.output import (
-    CYAN,
+    BOLD,
     DIM,
+    GREEN,
+    RED,
+    YELLOW,
     _c,
     _reset,
     clear_screen,
     emit_json,
     emit_models,
-    format_nginx_exposure,
-    format_nginx_security,
     format_optional,
+    format_strikethrough,
     print_empty,
+    print_field_rows,
     print_insight,
-    print_labeled_rows,
+    print_panel,
     print_report,
-    print_section,
-    print_site_card,
 )
 from iw_agent.cli.parser import add_timeout_flag
 from iw_agent.cli.registry import CliCommandSpec
+from iw_agent.core.commands import CommandResult
 from iw_agent.modules.ngnix.collector import (
     DEFAULT_NGINX_BINARY,
     DEFAULT_NGINX_TIMEOUT_SECONDS,
@@ -30,6 +32,8 @@ from iw_agent.modules.ngnix.collector import (
     fetch_nginx_dump,
 )
 from iw_agent.modules.ngnix.schemas import VirtualHost
+
+_FIELD_WIDTH = 11
 
 
 async def run_nginx(args: argparse.Namespace) -> None:
@@ -62,12 +66,11 @@ async def run_nginx_config(args: argparse.Namespace) -> None:
         return
 
     clear_screen()
-    print_report(
-        "Nginx configuration dump",
-        "Raw config read from nginx for advanced inspection.",
-    )
-
     if dump_result is None:
+        print_report(
+            "Nginx raw config",
+            "Advanced check — runs nginx -T on this server.",
+        )
         print_empty(
             "nginx not available",
             "The nginx program is missing or could not be started.",
@@ -75,24 +78,109 @@ async def run_nginx_config(args: argparse.Namespace) -> None:
         )
         return
 
-    print_labeled_rows(
-        [
-            ("Command result", "OK" if dump_result.ok else f"failed (exit {dump_result.exit_code})"),
-            ("Timed out", "yes" if dump_result.timed_out else "no"),
-        ]
-    )
+    _render_nginx_config(dump_result, show_stdout=args.show_stdout)
 
-    cert_paths = certificate_paths_from_dump(dump_result.stdout)
-    print_section(1, "Certificate files mentioned", "Paths nginx uses for HTTPS certificates.")
-    if cert_paths:
-        for cert_path in cert_paths:
-            print(f"   • {cert_path}")
-        print()
+
+def _nginx_config_summary(dump_result: CommandResult, cert_paths: list[str]) -> str:
+    if dump_result.timed_out:
+        status = "timed out"
+    elif dump_result.ok:
+        status = "loaded OK"
     else:
-        print_empty("no certificate paths", "No ssl_certificate lines were found.", "check nginx config.")
+        status = f"failed (exit {dump_result.exit_code})"
+    return f"nginx -T {status} · {len(cert_paths)} certificate path(s) in config"
 
-    if args.show_stdout:
-        print_section(2, "Raw nginx output", "Full text returned by nginx -T.")
+
+def _dump_status_fields(dump_result: CommandResult) -> list[tuple[str, str]]:
+    if dump_result.timed_out:
+        return [
+            ("Status", f"{_c(RED)}TIMED OUT{_reset()}"),
+            ("Why", "nginx -T did not finish before the timeout"),
+        ]
+    if dump_result.ok:
+        return [
+            ("Status", f"{_c(GREEN)}OK{_reset()}"),
+            ("Why", "nginx merged all config files without errors"),
+        ]
+    return [
+        ("Status", f"{_c(RED)}FAILED{_reset()}"),
+        ("Why", "nginx reported a syntax or include error"),
+    ]
+
+
+def _render_cert_path(cert_path: str, index: int) -> None:
+    label = cert_path.rsplit("/", 1)[-1] or cert_path
+    print(f"   {_c(BOLD)}{index}. {label}{_reset()}")
+    print(f"   {'-' * 48}")
+    print_field_rows(
+        [
+            ("File", cert_path),
+            ("Source", "ssl_certificate directive in nginx config"),
+        ],
+        label_width=_FIELD_WIDTH,
+    )
+    print()
+
+
+def _render_nginx_config(dump_result: CommandResult, *, show_stdout: bool) -> None:
+    cert_paths = certificate_paths_from_dump(dump_result.stdout)
+    line_count = dump_result.stdout.count("\n") + (1 if dump_result.stdout else 0)
+
+    print_report(
+        "Nginx raw config",
+        "Advanced check — not for everyday use. Try iw nginx for site overview.",
+    )
+    print_insight(_nginx_config_summary(dump_result, cert_paths))
+
+    print_panel("How to read", hint="field guide")
+    print_field_rows(
+        [
+            ("Purpose", "debug tool — dumps nginx's full merged config"),
+            ("vs iw nginx", "iw nginx = readable sites  |  this = raw dump"),
+            ("Status", "OK means nginx -T succeeded on this server"),
+            ("Certs", "paths from ssl_certificate lines in that dump"),
+            ("Raw text", "add --show-stdout to print the full nginx -T output"),
+        ],
+        label_width=_FIELD_WIDTH,
+    )
+    print()
+
+    print_panel("Dump result", hint="nginx -T command")
+    rows = [
+        *_dump_status_fields(dump_result),
+        ("Command", " ".join(dump_result.argv)),
+        ("Exit code", str(dump_result.exit_code)),
+        ("Output", f"{line_count} lines  {_c(DIM)}({len(dump_result.stdout)} chars){_reset()}"),
+    ]
+    if dump_result.stderr.strip():
+        stderr_preview = dump_result.stderr.strip().replace("\n", " · ")
+        if len(stderr_preview) > 120:
+            stderr_preview = f"{stderr_preview[:117]}..."
+        rows.append(("Errors", stderr_preview))
+    print_field_rows(rows, label_width=_FIELD_WIDTH)
+    print()
+
+    print_panel("Certificate paths", hint="files nginx references for HTTPS")
+    if cert_paths:
+        for index, cert_path in enumerate(cert_paths, start=1):
+            _render_cert_path(cert_path, index)
+    else:
+        print_empty(
+            "no certificate paths",
+            "No ssl_certificate lines were found in the dump.",
+            "sites may be HTTP only, or config failed to load.",
+        )
+
+    if show_stdout:
+        print_panel("Raw output", hint="full nginx -T text")
+        print_field_rows(
+            [
+                ("Status", "printed below"),
+                ("Why", "for advanced debugging only — can be very long"),
+            ],
+            label_width=_FIELD_WIDTH,
+        )
+        print()
         print(dump_result.stdout)
 
 
@@ -102,8 +190,7 @@ def _nginx_summary(virtual_hosts: list[VirtualHost]) -> str:
     disabled = sum(1 for host in parsed if not host.enabled)
     secured = sum(1 for host in parsed if host.enabled and host.ssl_enabled)
     return (
-        f"Found {len(parsed)} site config(s): {active} live, {disabled} disabled/off."
-        f" {secured} live site(s) use HTTPS."
+        f"{len(parsed)} site(s): {active} live, {disabled} off, {secured} with HTTPS."
     )
 
 
@@ -114,39 +201,77 @@ def _site_title(virtual_host: VirtualHost) -> str:
     return virtual_host.config_path.rsplit("/", 1)[-1] or "(unnamed site)"
 
 
-def _render_site_card(virtual_host: VirtualHost) -> None:
-    lines = [
-        format_nginx_security(
-            site_enabled=virtual_host.enabled,
-            ssl_enabled=virtual_host.ssl_enabled,
-        ),
-        format_nginx_exposure(virtual_host.listen_ports),
+def _status_fields(virtual_host: VirtualHost) -> list[tuple[str, str]]:
+    if virtual_host.enabled:
+        return [
+            ("Status", f"{_c(GREEN)}LIVE{_reset()}"),
+            ("Why", "nginx loaded and serves this config"),
+        ]
+    return [
+        ("Status", f"{_c(DIM)}OFF{_reset()}"),
+        ("Why", "in sites-available but not linked in sites-enabled"),
+    ]
+
+
+def _security_field(virtual_host: VirtualHost) -> tuple[str, str]:
+    if not virtual_host.enabled:
+        return ("Security", f"{_c(DIM)}n/a (site is off){_reset()}")
+    if virtual_host.ssl_enabled:
+        return ("Security", f"{_c(GREEN)}HTTPS{_reset()}  encrypted web traffic")
+    return ("Security", f"{_c(YELLOW)}HTTP only{_reset()}  no TLS certificate here")
+
+
+def _ports_field(virtual_host: VirtualHost) -> tuple[str, str]:
+    if not virtual_host.listen_ports:
+        return ("Ports", f"{_c(DIM)}none found{_reset()}")
+    port_text = ", ".join(str(port) for port in sorted(virtual_host.listen_ports))
+    note = "public web ports" if any(
+        port in {80, 443, 8080, 8443} for port in virtual_host.listen_ports
+    ) else "listening ports"
+    return ("Ports", f"{port_text}  {_c(DIM)}({note}){_reset()}")
+
+
+def _render_site(virtual_host: VirtualHost) -> None:
+    title = _site_title(virtual_host)
+    if not virtual_host.enabled:
+        title = format_strikethrough(title)
+
+    print(f"   {_c(BOLD)}{title}{_reset()}")
+    print(f"   {'-' * 48}")
+
+    rows = [
+        *_status_fields(virtual_host),
+        _security_field(virtual_host),
+        _ports_field(virtual_host),
     ]
 
     if virtual_host.upstream:
-        lines.append(f"{_c(CYAN)}→{_reset()} {virtual_host.upstream}")
-    if virtual_host.cert_path:
-        lines.append(f"{_c(DIM)}cert:{_reset()} {virtual_host.cert_path}")
-    lines.append(f"{_c(DIM)}{virtual_host.config_path}{_reset()}")
+        rows.append(
+            (
+                "Forwards",
+                f"{virtual_host.upstream}  {_c(DIM)}(backend target){_reset()}",
+            )
+        )
 
-    print_site_card(
-        site_enabled=virtual_host.enabled,
-        title=_site_title(virtual_host),
-        lines=lines,
-    )
+    if virtual_host.cert_path:
+        rows.append(("Cert file", virtual_host.cert_path))
+
+    rows.append(("Config", virtual_host.config_path))
+
+    print_field_rows(rows, label_width=_FIELD_WIDTH)
+    print()
 
 
 def _render_nginx(virtual_hosts: list[VirtualHost]) -> None:
     print_report(
         "Websites (nginx)",
-        "Live and disabled nginx site configurations on this server.",
+        "Which sites nginx serves, on which ports, with what security.",
     )
 
     parsed = [host for host in virtual_hosts if host.parse_ok]
     unparsed = [host for host in virtual_hosts if not host.parse_ok]
     active_hosts = [host for host in parsed if host.enabled]
     disabled_hosts = [host for host in parsed if not host.enabled]
-    step = 1
 
     if not parsed and not unparsed:
         print_empty(
@@ -159,30 +284,32 @@ def _render_nginx(virtual_hosts: list[VirtualHost]) -> None:
     if parsed:
         print_insight(_nginx_summary(parsed))
 
+        print_panel("How to read", hint="field guide")
+        print_field_rows(
+            [
+                ("Status", "LIVE = nginx serves it now  |  OFF = disabled config file"),
+                ("Security", "HTTPS = encrypted  |  HTTP only = no TLS"),
+                ("Forwards", "where nginx sends requests inside the server"),
+                ("Config", "file path on this machine"),
+            ],
+            label_width=_FIELD_WIDTH,
+        )
+        print()
+
         if active_hosts:
-            print_section(step, "Live websites", "These configs are loaded and served by nginx.")
-            step += 1
+            print_panel("Live sites", hint="currently served by nginx")
             for virtual_host in active_hosts:
-                _render_site_card(virtual_host)
+                _render_site(virtual_host)
 
         if disabled_hosts:
-            print_section(
-                step,
-                "Disabled websites",
-                "Found in sites-available but not linked in sites-enabled.",
-            )
-            step += 1
+            print_panel("Disabled sites", hint="not loaded — safe to ignore unless enabling")
             for virtual_host in disabled_hosts:
-                _render_site_card(virtual_host)
+                _render_site(virtual_host)
 
     if unparsed:
-        print_section(
-            step,
-            "Configuration problems",
-            "These entries could not be read cleanly.",
-        )
+        print_panel("Problems", hint="configs that could not be parsed")
         for virtual_host in unparsed:
-            print(f"   • {format_optional(virtual_host.parse_error)}")
+            print(f"   {_c(RED)}!{_reset()} {format_optional(virtual_host.parse_error)}")
         print()
 
 
@@ -209,7 +336,7 @@ COMMAND_SPECS = [
     CliCommandSpec("nginx", "nginx virtual hosts", run_nginx, _configure_nginx),
     CliCommandSpec(
         "nginx-config",
-        "nginx -T dump and certificate paths",
+        "advanced nginx -T dump and cert paths",
         run_nginx_config,
         _configure_nginx_config,
     ),

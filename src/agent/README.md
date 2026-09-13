@@ -53,7 +53,7 @@ Commands are flat and plain English:
 | `iw processes` | Top processes by CPU |
 | `iw containers` | Docker containers |
 | `iw nginx` | Nginx virtual hosts |
-| `iw nginx-config` | `nginx -T` dump and certificate paths |
+| `iw nginx-config` | Advanced: `nginx -T` check + SSL cert paths |
 | `iw certs` | SSL certificates on disk |
 | `iw cron` | Scheduled cron jobs |
 | `iw cron-history` | Recent cron run results |

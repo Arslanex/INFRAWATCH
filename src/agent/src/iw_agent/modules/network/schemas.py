@@ -9,6 +9,7 @@ class ListeningPort(AgentModel):
     listen_address: str
     pid: Optional[int] = None
     process_name: Optional[str] = None
+    owner_label: Optional[str] = None
 
     def __str__(self) -> str:
         return (

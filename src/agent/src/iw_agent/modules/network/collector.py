@@ -12,6 +12,12 @@ from iw_agent.core.psutil_helpers import (
     process_names_by_pid,
     read_inet_connections,
 )
+from iw_agent.modules.docker.collector import collect_containers
+from iw_agent.modules.network.port_enrichment import (
+    build_docker_port_mapping,
+    enrich_listening_port_owner,
+    owner_label_from_pid,
+)
 from iw_agent.modules.network.schemas import (
     ListeningPort,
     NetworkSnapshot,
@@ -29,12 +35,26 @@ DEFAULT_OUTBOUND_LIMIT = 200
 async def collect_network_snapshot(
     outbound_limit: int = DEFAULT_OUTBOUND_LIMIT,
 ) -> NetworkSnapshot:
-    return await read(_collect_network_snapshot, outbound_limit)
+    snapshot = await read(_collect_network_snapshot, outbound_limit)
+    await _enrich_listening_ports(snapshot.listening_ports)
+    return snapshot
 
 
 async def collect_listening_ports() -> list[ListeningPort]:
     snapshot = await collect_network_snapshot(outbound_limit=0)
     return snapshot.listening_ports
+
+
+async def _enrich_listening_ports(ports: list[ListeningPort]) -> None:
+    docker_mapping: dict[tuple[str, int, str], str] = {}
+    try:
+        containers = await collect_containers(limit=500)
+        docker_mapping = build_docker_port_mapping(containers)
+    except Exception as exc:
+        logger.debug("docker port enrichment skipped: %s", exc)
+
+    for port in ports:
+        enrich_listening_port_owner(port, docker_mapping)
 
 
 async def collect_outbound_connections(
@@ -118,6 +138,10 @@ def _build_listening_ports(
                     names_by_pid.get(connection.pid)
                     if connection.pid is not None
                     else None
+                ),
+                owner_label=owner_label_from_pid(
+                    connection.pid,
+                    names_by_pid.get(connection.pid) if connection.pid is not None else None,
                 ),
             )
         )

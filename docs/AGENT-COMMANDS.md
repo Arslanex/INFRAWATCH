@@ -71,8 +71,13 @@ Listening ports and outbound connections.
 
 | Command | Description |
 |---------|-------------|
-| `iw nginx` | Live + disabled virtual hosts |
-| `iw nginx-config` | `nginx -T` dump and certificate paths |
+| `iw nginx` | Sites nginx serves — domains, HTTPS, ports, backends |
+| `iw nginx-config` | Advanced: runs `nginx -T`, lists SSL cert file paths |
+
+**When to use which:**
+
+- **`iw nginx`** — everyday check: which sites are live, off, HTTP vs HTTPS.
+- **`iw nginx-config`** — troubleshooting only: did `nginx -T` succeed? which cert files are referenced in config? Add `--show-stdout` for the full raw dump.
 
 **Flags:** `--timeout SEC` · `--binary PATH` · `nginx-config --show-stdout`
 
