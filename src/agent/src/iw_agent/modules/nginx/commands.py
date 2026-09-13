@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from iw_agent.cli.action_prompts import print_action_result
@@ -488,6 +489,8 @@ async def _run_site_action(
     profile: SiteProfile,
     action_id: str,
     params: dict,
+    *,
+    skip_confirm: bool = False,
 ) -> ActionResult | None:
     from iw_agent.core.actions import ActionResult
 
@@ -504,10 +507,13 @@ async def _run_site_action(
         target_id=host.config_path,
         params=params,
     )
+    options = context.data["options"]
+    if skip_confirm:
+        options = replace(options, skip_confirm=True)
     try:
         return await run_action_with_prompts(
             request,
-            options=context.data["options"],
+            options=options,
             target_label=_site_title(host),
         )
     except ActionCancelledError:
@@ -577,6 +583,7 @@ async def _run_create_site_action(
     params: dict,
     *,
     pause: bool = True,
+    skip_confirm: bool = False,
 ) -> bool:
     domain = str(params.get("domain", ""))
     request = ActionRequest(
@@ -585,24 +592,25 @@ async def _run_create_site_action(
         target_id=domain,
         params=params,
     )
+    options = context.data["options"]
+    if skip_confirm:
+        options = replace(options, skip_confirm=True)
     try:
         result = await run_action_with_prompts(
             request,
-            options=context.data["options"],
+            options=options,
             target_label=domain,
         )
     except ActionCancelledError:
         print("\nCancelled.")
-        if pause:
-            input("\nPress Enter to continue...")
+        input("\nPress Enter to continue...")
         return False
     except ActionDeniedError as exc:
         print(f"\n{exc.message}")
-        if pause:
-            input("\nPress Enter to continue...")
+        input("\nPress Enter to continue...")
         return False
 
-    if pause:
+    if pause or not result.ok:
         print()
         print_action_result(result)
         input("\nPress Enter to continue...")
@@ -616,12 +624,18 @@ async def _run_create_site_with_optional_https(
     params: dict,
     *,
     pause: bool = True,
+    skip_confirm: bool = False,
 ) -> bool:
     https_now = bool(params.pop("https_now", False))
     email = params.pop("email", None)
     staging = bool(params.pop("staging", False))
 
-    if not await _run_create_site_action(context, params, pause=pause):
+    if not await _run_create_site_action(
+        context,
+        params,
+        pause=pause,
+        skip_confirm=skip_confirm,
+    ):
         return False
 
     if not https_now:
@@ -646,7 +660,13 @@ async def _run_create_site_with_optional_https(
     secure_params["staging"] = staging or getattr(context.args, "staging", False)
     secure_params["force"] = bool(params.get("force", False))
 
-    result = await _run_site_action(context, profile, "secure_site", secure_params)
+    result = await _run_site_action(
+        context,
+        profile,
+        "secure_site",
+        secure_params,
+        skip_confirm=skip_confirm,
+    )
     if result is None:
         return True
     if pause:
@@ -734,6 +754,34 @@ async def _interactive_pick_site(
     profiles: list[SiteProfile],
 ) -> VirtualHost | str | None:
     """Return a host to edit, ``__new__``, or ``None`` to quit."""
+    from iw_agent.modules.nginx.site_picker import SitePickerUnavailable, pick_site
+
+    hosts = [profile.virtual_host for profile in profiles if profile.virtual_host.parse_ok]
+    if hosts:
+        summary = _nginx_summary(hosts)
+    else:
+        summary = "No sites yet — create one with New site at the top."
+
+    try:
+        picked = await pick_site(
+            profiles,
+            summary=summary,
+            dry_run=getattr(args, "dry_run", False),
+        )
+    except SitePickerUnavailable:
+        return await _interactive_pick_site_fallback(profiles)
+
+    if picked is None:
+        return None
+    if picked == "__new__":
+        return "__new__"
+    return picked
+
+
+async def _interactive_pick_site_fallback(
+    profiles: list[SiteProfile],
+) -> VirtualHost | str | None:
+    """Numbered fallback when the terminal is too small or not interactive."""
     create_index = len(profiles) + 1
     quit_index = create_index + 1 if profiles else 2
 
@@ -771,6 +819,14 @@ async def _interactive_create_site(
     profiles: list[SiteProfile],
     options: ExecutorOptions,
 ) -> VirtualHost | None:
+    if not options.dry_run and not has_effective_root():
+        print(
+            "\nCreating a site writes under /etc/nginx — rerun with: sudo iw nginx -i",
+            file=sys.stderr,
+        )
+        input("\nPress Enter to continue...")
+        return None
+
     context = PageContext(args=args, data={"profiles": profiles, "options": options})
     domain = input("\nDomain (e.g. app.example.com): ").strip().lower()
     if not domain:
@@ -909,7 +965,12 @@ async def _interactive_create_site(
         "email": email,
         "staging": staging,
     }
-    if not await _run_create_site_with_optional_https(context, create_params, pause=False):
+    if not await _run_create_site_with_optional_https(
+        context,
+        create_params,
+        pause=False,
+        skip_confirm=True,
+    ):
         return None
 
     await _refresh_profiles(context)

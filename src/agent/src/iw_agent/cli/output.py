@@ -242,6 +242,32 @@ def print_info_box(
     _print_box_bottom(INFO_BOX_COLOR)
 
 
+def render_status_box_lines(
+    *,
+    badge: str,
+    title: str,
+    lines: list[str],
+    tone: str = "ok",
+    strike_title: bool = False,
+    selected: bool = False,
+    prefix: str = " ",
+) -> list[str]:
+    """Return status-box lines for TUI renderers (same look as :func:`print_status_box`)."""
+    border = _TONE_BORDERS.get(tone, GREEN)
+    if selected and not _plain_mode:
+        border = CYAN
+    marker = "▸ " if selected else "  "
+    display_title = format_strikethrough(title) if strike_title else f"{_c(BOLD)}{title}{_reset()}"
+    body = [
+        f"{prefix}{marker}{_c(border)}┌─ {badge}{_reset()}",
+        f"{prefix}  {_c(border)}│{_reset()} {display_title}",
+    ]
+    for line in lines:
+        body.append(f"{prefix}  {_c(border)}│{_reset()} {line}")
+    body.append(f"{prefix}  {_c(border)}└{'─' * _BOX_WIDTH}{_reset()}")
+    return body
+
+
 def print_status_box(
     *,
     badge: str,
@@ -250,13 +276,15 @@ def print_status_box(
     tone: str = "ok",
     strike_title: bool = False,
 ) -> None:
-    border = _TONE_BORDERS.get(tone, GREEN)
-    display_title = format_strikethrough(title) if strike_title else f"{_c(BOLD)}{title}{_reset()}"
-    _print_box_top(border, badge)
-    _print_box_line(border, display_title)
-    for line in lines:
-        _print_box_line(border, line)
-    _print_box_bottom(border)
+    for line in render_status_box_lines(
+        badge=badge,
+        title=title,
+        lines=lines,
+        tone=tone,
+        strike_title=strike_title,
+        prefix="   ",
+    ):
+        print(line)
 
 
 def print_group_heading(title: str, hint: str | None = None) -> None:

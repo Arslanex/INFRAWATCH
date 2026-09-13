@@ -9,10 +9,11 @@ from dataclasses import dataclass
 
 from iw_agent.cli.output import BOLD, DIM, _c, _reset, pad_visible, truncate_visible
 from iw_agent.modules.nginx.confparse import Block, Comment, Directive, Raw
+from iw_agent.modules.nginx.editor.hints import hint_for_row
 from iw_agent.modules.nginx.editor.rows import Row, RowKind
 
-RIGHT_PANE_WIDTH = 34
-MIN_SPLIT_WIDTH = 72
+RIGHT_PANE_WIDTH = 42
+MIN_SPLIT_WIDTH = 86
 MIN_HEIGHT = 8
 
 GUTTER = 5
@@ -228,47 +229,49 @@ def _detail_lines(frame: Frame) -> list[str]:
     if not frame.rows:
         return []
     row = frame.rows[min(frame.cursor, len(frame.rows) - 1)]
-    lines = [""]
+    hint = hint_for_row(row)
+    width = RIGHT_PANE_WIDTH - 2
+    lines = [
+        "",
+        f" {_c(_CYAN)}{hint.title}{_reset()}",
+        f" {_c(DIM)}{'─' * width}{_reset()}",
+    ]
 
+    if isinstance(row.node, Directive):
+        value = " ".join(row.node.args) or "(no value)"
+        lines.append(f" {_c(BOLD)}now{_reset()} {_c(DIM)}{_truncate(value, width - 4)}{_reset()}")
+        lines.append("")
+
+    lines += _panel_section("What", hint.what, width)
+    lines += _panel_section("Changes", hint.changes, width)
+    lines += _panel_section("Add here", hint.add_here, width)
+
+    dim, reset = _c(DIM), _reset()
     if row.kind is RowKind.ADD_SLOT:
-        parent = getattr(row.insert_parent, "name", "") or "file"
-        lines += [
-            f" {_c(_GREEN)}add{_reset()}",
-            f" {_c(DIM)}{'─' * (RIGHT_PANE_WIDTH - 2)}{_reset()}",
-            f" insert into {parent}",
-            "",
-            f" {_c(DIM)}enter{_reset()}  choose what to add",
-        ]
-        return lines
-
-    node = row.node
-    if isinstance(node, Directive):
-        value = " ".join(node.args) or "(no value)"
-        lines += [
-            f" {_c(_CYAN)}{node.name}{_reset()}",
-            f" {_c(DIM)}{'─' * (RIGHT_PANE_WIDTH - 2)}{_reset()}",
-        ]
-        lines += [f" {chunk}" for chunk in _wrap(value, RIGHT_PANE_WIDTH - 2)]
-    elif isinstance(node, Block):
-        args = " ".join(node.args)
-        lines += [
-            f" {_c(_CYAN)}{node.name} {args}{_reset()}".rstrip(),
-            f" {_c(DIM)}{'─' * (RIGHT_PANE_WIDTH - 2)}{_reset()}",
-            f" {len(node.children)} entries inside",
-        ]
-    elif isinstance(node, Raw):
-        lines += [
-            f" {_c(_YELLOW)}not structured{_reset()}",
-            f" {_c(DIM)}{'─' * (RIGHT_PANE_WIDTH - 2)}{_reset()}",
-        ]
-        lines += [f" {chunk}" for chunk in _wrap(node.reason, RIGHT_PANE_WIDTH - 2)]
-    elif isinstance(node, Comment):
-        lines += [f" {_c(DIM)}comment{_reset()}"]
+        keys = f"{dim}enter{reset} pick template  {dim}a{reset} same"
+    elif isinstance(row.node, Block) and row.kind is RowKind.BLOCK_OPEN:
+        keys = f"{dim}enter{reset} edit header  {dim}->{reset} expand  {dim}a{reset} add inside"
     else:
-        lines += [f" {_c(DIM)}blank line{_reset()}"]
+        keys = f"{dim}enter{reset} edit  {dim}a{reset} add after  {dim}d{reset} delete"
 
-    lines += ["", f" {_c(DIM)}enter{_reset()}  edit", f" {_c(DIM)}a{_reset()}      add after"]
+    lines += ["", f" {keys}"]
     return lines
+
+
+def _panel_section(label: str, text: str, width: int) -> list[str]:
+    body = _wrap(text, width)
+    if not body:
+        return []
+    out = [f" {_c(BOLD)}{label}{_reset()}"]
+    out.extend(f" {_c(DIM)}{chunk}{_reset()}" for chunk in body)
+    out.append("")
+    return out
+
+
+def _truncate(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    return f"{text[: max(0, width - 1)]}…"
 
 
 def _wrap(text: str, width: int) -> list[str]:

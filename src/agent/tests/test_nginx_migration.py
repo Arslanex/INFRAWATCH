@@ -54,6 +54,12 @@ def test_the_site_picker_loop_opens_the_editor():
     assert "Navigator" not in source
 
 
+def test_the_site_picker_uses_the_tui_cards():
+    source = inspect.getsource(commands._interactive_pick_site)
+
+    assert "pick_site" in source
+
+
 def test_new_site_creation_opens_the_editor():
     source = inspect.getsource(commands._interactive_create_site)
 

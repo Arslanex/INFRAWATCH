@@ -117,7 +117,7 @@ Navigation: `b` back · `q` quit
 
 | Entry | Description |
 |-------|-------------|
-| `iw nginx -i` | Site picker → full-screen config editor |
+| `iw nginx -i` | Site picker (status boxes, ↑↓ + Enter) → config editor |
 | `iw nginx -i --site app.example.com` | Open that site directly |
 | `iw` → nginx → **2** | Same from the main menu |
 | `--dry-run` | Preview saves and actions without root (no disk writes) |
