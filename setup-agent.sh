@@ -23,7 +23,7 @@ SKIP_SYSTEM_DEPS=0
 UI_PLAIN=0
 [[ -n "${NO_COLOR:-}" || ! -t 1 ]] && UI_PLAIN=1
 
-UI_B="" UI_D="" UI_G="" UI_Y="" UI_R="" UI_M="" UI_N=""
+UI_B="" UI_D="" UI_G="" UI_Y="" UI_R="" UI_M="" UI_PAGE="" UI_N=""
 if [[ "$UI_PLAIN" -eq 0 ]]; then
     UI_B=$'\033[1m'
     UI_D=$'\033[2m'
@@ -31,6 +31,7 @@ if [[ "$UI_PLAIN" -eq 0 ]]; then
     UI_Y=$'\033[33m'
     UI_R=$'\033[31m'
     UI_M=$'\033[35m'
+    UI_PAGE=$'\033[34m'
     UI_N=$'\033[0m'
 fi
 
@@ -40,17 +41,18 @@ UI_BOX_BORDER=""
 ui_header() {
     local title="$1"
     local subtitle="${2:-}"
-    ui_box_open info "${UI_B}${title}${UI_N}"
+    printf '\n'
     if [[ -n "$subtitle" ]]; then
-        ui_box_field "About" "$subtitle"
+        printf '   %s▌%s %s%s%s  %s%s%s\n' \
+            "$UI_PAGE" "$UI_N" "$UI_B" "$title" "$UI_N" "$UI_D" "$subtitle" "$UI_N"
+    else
+        printf '   %s▌%s %s%s%s\n' "$UI_PAGE" "$UI_N" "$UI_B" "$title" "$UI_N"
     fi
-    ui_box_close
 }
 
 ui_summary() {
-    ui_box_open info "${UI_B}Summary:${UI_N}"
-    ui_box_line "$1"
-    ui_box_close
+    printf '   %sSummary:%s %s%s%s\n' "$UI_B" "$UI_N" "$UI_D" "$1" "$UI_N"
+    printf '   %s%s%s\n' "$UI_D" "$(printf '─%.0s' $(seq 1 52))" "$UI_N"
 }
 
 ui_box_open() {

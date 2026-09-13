@@ -10,12 +10,14 @@ from typing import Any, Callable, Sequence
 from iw_agent.core.schemas import AgentModel
 
 _plain_mode = False
+_page_divider_printed = False
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 
 def configure_output(*, plain: bool = False) -> None:
-    global _plain_mode
+    global _plain_mode, _page_divider_printed
     _plain_mode = plain or bool(os.environ.get("NO_COLOR"))
+    _page_divider_printed = False
 
 
 def _c(code: str) -> str:
@@ -38,6 +40,8 @@ STRIKE = "\033[9m"
 
 COLUMN_COLORS = (CYAN, YELLOW, GREEN, BLUE, MAGENTA)
 INFO_BOX_COLOR = MAGENTA
+_PAGE_WIDTH = 52
+_PAGE_ACCENT = BLUE
 _BOX_WIDTH = 44
 _TONE_BORDERS = {
     "ok": GREEN,
@@ -81,29 +85,41 @@ def _color_cell(text: str, color: str) -> str:
     return f"{_c(color)}{text}{_reset()}"
 
 
+def print_page_divider() -> None:
+    global _page_divider_printed
+    print(f"   {_c(DIM)}{'─' * _PAGE_WIDTH}{_reset()}")
+    _page_divider_printed = True
+
+
+def print_page_header(title: str, subtitle: str) -> None:
+    print()
+    print(
+        f"   {_c(_PAGE_ACCENT)}▌{_reset()} {_c(BOLD)}{title}{_reset()}"
+        f"  {_c(DIM)}{subtitle}{_reset()}"
+    )
+
+
+def print_page_summary(text: str) -> None:
+    print(f"   {format_label('Summary')} {_c(DIM)}{text}{_reset()}")
+
+
 def print_banner() -> None:
     print()
-    _print_box_top(INFO_BOX_COLOR, f"{_c(BOLD)}InfraWatch{_reset()}")
-    _print_box_line(INFO_BOX_COLOR, format_field("About", "server inspection tool", label_width=8))
-    _print_box_line(
-        INFO_BOX_COLOR,
-        format_field("Try", "iw device · iw ports · iw containers", label_width=8),
+    print(
+        f"   {_c(BOLD)}{_c(_PAGE_ACCENT)}InfraWatch{_reset()}"
+        f"  {_c(DIM)}server inspection tool{_reset()}"
     )
-    _print_box_bottom(INFO_BOX_COLOR)
+    print(f"   {_c(DIM)}iw device · iw ports · iw containers{_reset()}")
+    print_page_divider()
 
 
 def print_report(title: str, subtitle: str) -> None:
-    print()
-    _print_box_top(INFO_BOX_COLOR, f"{_c(BOLD)}{title}{_reset()}")
-    _print_box_line(INFO_BOX_COLOR, format_field("About", subtitle, label_width=8))
-    _print_box_bottom(INFO_BOX_COLOR)
+    print_page_header(title, subtitle)
 
 
 def print_insight(text: str) -> None:
-    print()
-    _print_box_top(INFO_BOX_COLOR, format_label("Summary"))
-    _print_box_line(INFO_BOX_COLOR, text)
-    _print_box_bottom(INFO_BOX_COLOR)
+    print_page_summary(text)
+    print_page_divider()
 
 
 def print_section(step: int, title: str, description: str) -> None:
@@ -152,7 +168,6 @@ def _print_box_line(border: str, line: str) -> None:
 
 def _print_box_bottom(border: str) -> None:
     print(f"   {_c(border)}└{'─' * _BOX_WIDTH}{_reset()}")
-    print()
 
 
 def print_info_box(
@@ -188,12 +203,13 @@ def print_status_box(
 
 
 def print_group_heading(title: str, hint: str | None = None) -> None:
-    print()
     if hint:
-        print(f"   {format_label(title)} {_c(DIM)}{hint}{_reset()}")
+        print(
+            f"   {_c(DIM)}──{_reset()} {_c(BOLD)}{title}{_reset()}"
+            f" {_c(DIM)}· {hint}{_reset()}"
+        )
     else:
-        print(f"   {format_label(title.rstrip(':'))}")
-    print()
+        print(f"   {_c(DIM)}──{_reset()} {_c(BOLD)}{title}{_reset()}")
 
 
 def print_panel(title: str, *, hint: str | None = None) -> None:
@@ -233,6 +249,8 @@ def print_labeled_block(label: str, lines: list[str], *, label_width: int | None
 
 
 def print_empty(title: str, reason: str, hint: str) -> None:
+    if not _page_divider_printed:
+        print_page_divider()
     print_status_box(
         badge=status_badge("EMPTY", "warn"),
         title=title,
