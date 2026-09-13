@@ -37,6 +37,7 @@ RED = "\033[31m"
 BLUE = "\033[34m"
 MAGENTA = "\033[35m"
 STRIKE = "\033[9m"
+BG_SELECTED = "\033[48;5;24m"
 
 COLUMN_COLORS = (CYAN, YELLOW, GREEN, BLUE, MAGENTA)
 INFO_BOX_COLOR = MAGENTA
@@ -78,6 +79,15 @@ def pad_visible(text: str, width: int) -> str:
     if padding <= 0:
         return text
     return text + (" " * padding)
+
+
+def highlight_row(text: str, *, selected: bool = False, width: int | None = None) -> str:
+    """Paint a TUI row with a background when ``selected`` (full width if given)."""
+    if width is not None:
+        text = pad_visible(text, width)
+    if not selected or _plain_mode:
+        return text
+    return f"{_c(BG_SELECTED)}{text}{_reset()}"
 
 
 def truncate_visible(text: str, width: int, *, ellipsis: str = "\u2026") -> str:

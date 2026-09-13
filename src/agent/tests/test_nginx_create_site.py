@@ -48,6 +48,22 @@ async def test_create_site_action_skips_second_confirm_when_requested(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_interactive_create_site_retries_invalid_domain(monkeypatch):
+    monkeypatch.setattr(commands, "has_effective_root", lambda: True)
+    monkeypatch.setattr(commands, "clear_screen", lambda: None)
+    inputs = iter(["not a domain", "q"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+
+    host = await commands._interactive_create_site(
+        argparse.Namespace(nginx_binary="nginx", timeout=10),
+        [],
+        ExecutorOptions(dry_run=True),
+    )
+
+    assert host is None
+
+
+@pytest.mark.asyncio
 async def test_interactive_create_site_requires_root_before_wizard(monkeypatch):
     monkeypatch.setattr(commands, "has_effective_root", lambda: False)
     monkeypatch.setattr("builtins.input", lambda _prompt="": "")

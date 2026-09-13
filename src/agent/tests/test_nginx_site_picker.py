@@ -66,13 +66,26 @@ def test_enter_on_site_returns_host():
     assert session.result == profile.virtual_host
 
 
-def test_frame_shows_status_box_fields():
+def test_frame_shows_compact_site_fields():
     session = SitePickerSession.from_profiles([_profile("demo.test")], summary="1 site(s)")
     session.handle(Key.DOWN)
     frame = "\n".join(session.frame_lines(100, 24))
     assert "demo.test" in frame
-    assert "Forwards" in frame
-    assert "Config" in frame
+    assert "Why:" in frame
+    assert "Security:" in frame
+    assert "Certificate:" in frame
+    assert "Forwards" not in frame
+    assert "Config" not in frame
+
+
+def test_selected_site_row_gets_background_highlight(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    configure_output(plain=False)
+    session = SitePickerSession.from_profiles([_profile("demo.test")], summary="1 site")
+    session.handle(Key.DOWN)
+    frame = session.frame_lines(80, 24)
+    highlighted = [line for line in frame if "\033[48;" in line]
+    assert highlighted, "expected background highlight on selected card rows"
 
 
 class FakeTerminal:

@@ -19,11 +19,11 @@ def prompt_choice(
         try:
             choice = int(raw)
         except ValueError:
-            print("Enter a number from the list.", file=sys.stderr)
+            print("   ! Enter a number from the list.", file=sys.stderr)
             continue
         if 1 <= choice <= max_value:
             return choice
-        print(f"Enter a number between 1 and {max_value}.", file=sys.stderr)
+        print(f"   ! Enter a number between 1 and {max_value}.", file=sys.stderr)
 
 
 def prompt_yes_no(message: str, *, default: bool = False) -> bool:
@@ -36,4 +36,4 @@ def prompt_yes_no(message: str, *, default: bool = False) -> bool:
             return True
         if raw in {"n", "no"}:
             return False
-        print("Enter y or n.", file=sys.stderr)
+        print("   ! Enter y or n.", file=sys.stderr)

@@ -8,6 +8,13 @@ from pathlib import Path
 
 from iw_agent.cli.action_prompts import print_action_result
 from iw_agent.cli.action_runner import run_action_with_prompts
+from iw_agent.cli.interactive.form import (
+    print_form_step,
+    print_form_warning,
+    prompt_choice_menu,
+    prompt_int,
+    prompt_text,
+)
 from iw_agent.cli.interactive.navigator import PageContext
 from iw_agent.cli.interactive.selector import prompt_choice, prompt_yes_no
 from iw_agent.core.actions import ActionResult
@@ -31,6 +38,7 @@ from iw_agent.cli.output import (
     print_info_box,
     print_insight,
     print_menu_item,
+    print_labeled_rows,
     print_page_divider,
     print_page_header,
     print_page_summary,
@@ -38,6 +46,7 @@ from iw_agent.cli.output import (
     print_status_box,
     prepare_command_view,
     status_badge,
+    YELLOW,
 )
 from iw_agent.cli.parser import add_interactive_flags, add_timeout_flag
 from iw_agent.cli.registry import CliCommandSpec
@@ -568,6 +577,16 @@ def _parse_extra_domains(raw: str) -> tuple[list[str], str | None]:
     return extras, None
 
 
+def _domain_taken(domain: str, profiles: list[SiteProfile]) -> bool:
+    for profile in profiles:
+        host = profile.virtual_host
+        if domain in host.server_names:
+            return True
+        if host.config_path.endswith(f"/{domain}"):
+            return True
+    return False
+
+
 def _find_profile_by_domain(context: PageContext, domain: str) -> SiteProfile | None:
     for profile in context.data["profiles"]:
         host = profile.virtual_host
@@ -814,6 +833,29 @@ async def _interactive_pick_site_fallback(
     return profiles[choice - 1].virtual_host
 
 
+_CREATE_SITE_STEPS = 5
+
+
+def _validate_new_domain(domain: str, profiles: list[SiteProfile]) -> str | None:
+    if not _valid_domain(domain):
+        return "Enter a valid domain, e.g. app.example.com"
+    if _domain_taken(domain, profiles):
+        return f"{domain} already has a config on this server"
+    return None
+
+
+def _validate_proxy_url(url: str) -> str | None:
+    if url.startswith("http://") or url.startswith("https://"):
+        return None
+    return "Backend URL must start with http:// or https://"
+
+
+def _validate_email(email: str) -> str | None:
+    if "@" in email and "." in email.split("@", 1)[-1]:
+        return None
+    return "Enter a valid email address for Let's Encrypt"
+
+
 async def _interactive_create_site(
     args: argparse.Namespace,
     profiles: list[SiteProfile],
@@ -827,23 +869,39 @@ async def _interactive_create_site(
         input("\nPress Enter to continue...")
         return None
 
-    context = PageContext(args=args, data={"profiles": profiles, "options": options})
-    domain = input("\nDomain (e.g. app.example.com): ").strip().lower()
-    if not domain:
-        print("Domain is required.", file=sys.stderr)
-        return None
-    if not _valid_domain(domain):
-        print("Enter a valid domain name.", file=sys.stderr)
-        return None
+    clear_screen()
+    print_page_header("New site", "nginx")
+    print_page_summary("Answer each step — bad input shows a warning and lets you retry. q cancels.")
+    print_page_divider()
 
-    include_www = prompt_yes_no(f"\nAlso serve www.{domain}?", default=True)
-    extra_raw = input(
-        "\nExtra domains (comma-separated, or leave empty): ",
-    ).strip()
-    extra_domains, extra_error = _parse_extra_domains(extra_raw)
-    if extra_error:
-        print(extra_error, file=sys.stderr)
+    context = PageContext(args=args, data={"profiles": profiles, "options": options})
+
+    print_form_step(step=1, total=_CREATE_SITE_STEPS, title="Domain", hint="primary server_name")
+    domain = prompt_text(
+        "Domain",
+        hint="Example: app.example.com",
+        validator=lambda value: _validate_new_domain(value.lower(), profiles),
+    )
+    if domain is None:
         return None
+    domain = domain.lower()
+
+    print_form_step(step=2, total=_CREATE_SITE_STEPS, title="Server names", hint="who can reach this site")
+    include_www = prompt_yes_no(f"   Also serve www.{domain}?", default=True)
+    while True:
+        extra_raw = prompt_text(
+            "Extra domains",
+            hint="Comma-separated aliases, or press Enter to skip",
+            default="",
+            allow_empty=True,
+        )
+        if extra_raw is None:
+            return None
+        extra_domains, extra_error = _parse_extra_domains(extra_raw)
+        if extra_error:
+            print_form_warning(extra_error)
+            continue
+        break
 
     server_names = _build_server_names(
         domain,
@@ -851,28 +909,39 @@ async def _interactive_create_site(
         extra_domains=extra_domains,
     )
 
-    print("\nHTTP listen port:")
-    print("   1. Standard (80)")
-    print("   2. Custom port")
-    port_choice = prompt_choice(max_value=2, allow_back=False, allow_exit=True)
+    port_choice = prompt_choice_menu(
+        step=3,
+        total=_CREATE_SITE_STEPS,
+        title="HTTP port",
+        hint="where nginx listens for this site",
+        options=[
+            ("Standard — port 80", "normal web traffic"),
+            ("Custom port", "e.g. 8080 for internal apps"),
+        ],
+    )
     if port_choice is None:
         return None
     http_port = 80
     if port_choice == 2:
-        raw_port = input("\nCustom HTTP port (e.g. 8080): ").strip()
-        try:
-            http_port = int(raw_port)
-        except ValueError:
-            print("Enter a valid port number.", file=sys.stderr)
+        custom = prompt_int(
+            "Port number",
+            hint="1–65535",
+        )
+        if custom is None:
             return None
-        if http_port < 1 or http_port > 65535:
-            print("Port must be between 1 and 65535.", file=sys.stderr)
-            return None
+        http_port = custom
 
-    print("\nSite type:")
-    print("   1. Static files (HTML, assets)")
-    print("   2. Reverse proxy (app on localhost)")
-    kind_choice = prompt_choice(max_value=2, allow_back=True, allow_exit=True)
+    kind_choice = prompt_choice_menu(
+        step=4,
+        total=_CREATE_SITE_STEPS,
+        title="Site type",
+        hint="how nginx serves requests",
+        options=[
+            ("Static files", "HTML, CSS, images from disk"),
+            ("Reverse proxy", "forward to an app on localhost"),
+        ],
+        allow_back=True,
+    )
     if kind_choice is None or kind_choice == -1:
         return None
 
@@ -890,73 +959,101 @@ async def _interactive_create_site(
     if kind_choice == 1:
         params["site_kind"] = SiteKind.STATIC.value
         default_root = f"/var/www/{domain}"
-        root = input(f"\nDocument root [{default_root}]: ").strip()
+        root = prompt_text(
+            "Document root",
+            hint="Folder nginx reads files from",
+            default=default_root,
+        )
+        if root is None:
+            return None
         params["document_root"] = root or default_root
 
-        print("\ntry_files preset:")
-        print(f"   1. Standard ({TRY_FILES_STANDARD})")
-        print(f"   2. SPA ({TRY_FILES_SPA})")
-        try_choice = prompt_choice(max_value=2, allow_back=False, allow_exit=False)
+        try_choice = prompt_choice_menu(
+            step=4,
+            total=_CREATE_SITE_STEPS,
+            title="try_files preset",
+            hint="how missing paths are resolved",
+            options=[
+                ("Standard", TRY_FILES_STANDARD),
+                ("Single-page app (SPA)", TRY_FILES_SPA),
+            ],
+            allow_back=True,
+        )
+        if try_choice is None or try_choice == -1:
+            return None
         params["try_files"] = TRY_FILES_STANDARD if try_choice == 1 else TRY_FILES_SPA
     else:
         params["site_kind"] = SiteKind.PROXY.value
-        proxy_pass = input("\nBackend URL (e.g. http://127.0.0.1:3000): ").strip()
-        if not proxy_pass:
-            print("Backend URL is required.", file=sys.stderr)
+        proxy_pass = prompt_text(
+            "Backend URL",
+            hint="Example: http://127.0.0.1:3000",
+            validator=_validate_proxy_url,
+        )
+        if proxy_pass is None:
             return None
         params["proxy_pass"] = proxy_pass
 
-    params["enable_site"] = prompt_yes_no("\nEnable site now (symlink + reload)?", default=True)
+    print_form_step(step=5, total=_CREATE_SITE_STEPS, title="Publish", hint="enable and optional HTTPS")
+    params["enable_site"] = prompt_yes_no("   Enable site now (symlink + reload)?", default=True)
 
     https_now = False
     email = ""
     staging = getattr(context.args, "staging", False)
     if params["enable_site"]:
         https_now = prompt_yes_no(
-            "\nSet up HTTPS now (certbot + nginx SSL + redirect)?",
+            "   Set up HTTPS now (certbot + SSL + redirect)?",
             default=False,
         )
         if https_now:
-            email = input("\nLet's Encrypt email: ").strip()
-            if not email:
-                print("Email is required for HTTPS setup.", file=sys.stderr)
-                return None
+            while True:
+                email = prompt_text(
+                    "Let's Encrypt email",
+                    hint="Used for expiry notices",
+                    validator=_validate_email,
+                )
+                if email is None:
+                    return None
+                break
             if not staging:
                 staging = prompt_yes_no(
-                    "Use Let's Encrypt staging (test cert)?",
+                    "   Use Let's Encrypt staging (test certificate)?",
                     default=False,
                 )
 
             errors, warnings = await precheck_certificate_domain(domain)
             for message in warnings:
-                print(f"  warning: {message}")
+                print(f"   {_c(YELLOW)}warning:{_reset()} {message}")
             for message in errors:
-                print(f"  error: {message}", file=sys.stderr)
+                print(f"   {_c(YELLOW)}error:{_reset()} {message}")
             if errors:
-                if not prompt_yes_no("\nPrecheck errors found. Continue anyway?", default=False):
+                if not prompt_yes_no("   Precheck errors — continue anyway?", default=False):
                     return None
                 params["force"] = True
             elif warnings:
-                if not prompt_yes_no("\nContinue with warnings?", default=True):
+                if not prompt_yes_no("   Continue with warnings?", default=True):
                     return None
 
-    print("\nPreview:")
-    print(f"  domain: {domain}")
-    print(f"  server_names: {', '.join(server_names)}")
-    print(f"  http_port: {http_port}")
-    print(f"  type: {params['site_kind']}")
+    print()
+    print_group_heading("Review", "confirm before writing config")
+    preview_rows = [
+        ("Domain", domain),
+        ("Names", ", ".join(server_names)),
+        ("Port", str(http_port)),
+        ("Type", params["site_kind"]),
+    ]
     if params["site_kind"] == SiteKind.STATIC.value:
-        print(f"  root: {params.get('document_root')}")
-        print(f"  try_files: {params.get('try_files')}")
+        preview_rows.append(("Root", str(params.get("document_root"))))
+        preview_rows.append(("try_files", str(params.get("try_files"))))
     else:
-        print(f"  proxy_pass: {params.get('proxy_pass')}")
-    print(f"  enable: {'yes' if params['enable_site'] else 'no'}")
-    print(f"  https_now: {'yes' if https_now else 'no'}")
+        preview_rows.append(("Backend", str(params.get("proxy_pass"))))
+    preview_rows.append(("Enable", "yes" if params["enable_site"] else "no"))
+    preview_rows.append(("HTTPS now", "yes" if https_now else "no"))
     if https_now:
-        print(f"  email: {email}")
-        print(f"  staging: {'yes' if staging else 'no'}")
+        preview_rows.append(("Email", email))
+        preview_rows.append(("Staging", "yes" if staging else "no"))
+    print_labeled_rows(preview_rows)
 
-    if not prompt_yes_no("\nCreate this site?", default=True):
+    if not prompt_yes_no("   Create this site?", default=True):
         return None
 
     create_params = {

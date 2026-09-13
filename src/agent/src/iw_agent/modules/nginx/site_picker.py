@@ -1,7 +1,7 @@
 """Full-screen site picker for ``iw nginx -i``.
 
-Shows the same status-box cards as the read-only list, with arrow-key
-navigation. **New site** is always first; ``q`` quits.
+Compact cards (domain, why, security, certificate) with arrow-key navigation.
+**New site** is always first; ``q`` quits.
 """
 from __future__ import annotations
 
@@ -14,11 +14,9 @@ from iw_agent.cli.output import (
     _c,
     _reset,
     format_field,
-    format_nginx_exposure,
     format_nginx_security,
-    format_nginx_status_badge,
-    render_status_box_lines,
-    status_badge,
+    format_strikethrough,
+    highlight_row,
     truncate_visible,
 )
 from iw_agent.cli.tui.keys import Key, ctrl, decode
@@ -70,18 +68,13 @@ class SitePickerSession:
         summary: str,
         dry_run: bool = False,
     ) -> SitePickerSession:
-        cards = [_new_site_card(selected=False)]
+        cards = [_new_site_card()]
         for profile in profiles:
-            cards.append(_site_card(profile, selected=False))
+            cards.append(_site_card(profile))
         return cls(cards=cards, summary=summary, dry_run=dry_run)
 
     def _card_lines(self, index: int) -> list[str]:
-        card = self.cards[index]
-        if index == self.cursor:
-            if card.kind == "new":
-                return _new_site_card(selected=True).lines
-            return _site_card(card.profile, selected=True).lines
-        return card.lines
+        return self.cards[index].lines
 
     def frame_lines(self, width: int, height: int) -> list[str]:
         header = f" {_c(BOLD)}Websites (nginx){_reset()}  {_c(DIM)}pick a site to edit{_reset()}"
@@ -102,10 +95,12 @@ class SitePickerSession:
             index = self.top + offset
             if index >= len(self.cards):
                 break
+            selected = index == self.cursor
             for card_line in self._card_lines(index):
                 if used >= body_rows + 2:
                     break
-                lines.append(truncate_visible(card_line, width))
+                line = truncate_visible(card_line, width)
+                lines.append(highlight_row(line, selected=selected, width=width))
                 used += 1
             if used < body_rows + 2 and index + 1 < len(self.cards):
                 lines.append("")
@@ -136,21 +131,24 @@ class SitePickerSession:
             self.running = False
 
 
-def _new_site_card(*, selected: bool) -> _Card:
-    lines = render_status_box_lines(
-        badge=status_badge("NEW SITE", "work"),
-        title="Create a new site",
-        lines=[
-            format_field("Action", "write a minimal config skeleton"),
-            format_field("Next", "open the structural editor to finish"),
-        ],
-        tone="work",
-        selected=selected,
+def _compact_card_lines(title: str, body: list[str], *, strike_title: bool = False) -> list[str]:
+    bar = f"{_c(DIM)}│{_reset()}"
+    display_title = format_strikethrough(title) if strike_title else f"{_c(BOLD)}{title}{_reset()}"
+    lines = [f" {bar} {display_title}"]
+    for line in body:
+        lines.append(f" {bar} {line}")
+    return lines
+
+
+def _new_site_card() -> _Card:
+    lines = _compact_card_lines(
+        "Create a new site",
+        [format_field("Next", "minimal skeleton → structural editor")],
     )
     return _Card(kind="new", lines=lines)
 
 
-def _site_card(profile: SiteProfile, *, selected: bool) -> _Card:
+def _site_card(profile: SiteProfile) -> _Card:
     host = profile.virtual_host
     why = (
         "nginx loaded and serves this config"
@@ -168,30 +166,15 @@ def _site_card(profile: SiteProfile, *, selected: bool) -> _Card:
             ),
         ),
         format_field("Certificate", ssl_label),
-        format_field("Ports", format_nginx_exposure(host.listen_ports)),
     ]
-    if host.upstream:
-        body.append(format_field("Forwards", host.upstream))
-    if host.cert_path:
-        body.append(format_field("Cert file", host.cert_path))
-    body.append(format_field("Config", host.config_path))
-
     title = ", ".join(host.server_names) or host.config_path.rsplit("/", 1)[-1] or "(unnamed site)"
-    tone = "ok" if host.enabled else "off"
-    lines = render_status_box_lines(
-        badge=format_nginx_status_badge(site_enabled=host.enabled),
-        title=title,
-        lines=body,
-        tone=tone,
-        strike_title=not host.enabled,
-        selected=selected,
-    )
+    lines = _compact_card_lines(title, body, strike_title=not host.enabled)
     return _Card(kind="site", lines=lines, profile=profile)
 
 
 def _visible_card_count(body_rows: int) -> int:
-    # average card ~8 lines + blank separator
-    return max(1, body_rows // 9 + 1)
+    # title + 3 fields + blank separator ≈ 5 lines per card
+    return max(1, body_rows // 6 + 1)
 
 
 def _clamp_top(top: int, cursor: int, visible: int, total: int) -> int:

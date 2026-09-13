@@ -1,5 +1,6 @@
 from iw_agent.cli.interactive.action_menu import print_action_menu, select_action
 from iw_agent.cli.interactive.navigator import Navigator, PageResult
+from iw_agent.cli.interactive.form import print_form_step, prompt_text
 from iw_agent.cli.interactive.selector import prompt_choice, prompt_yes_no
 
 __all__ = [
