@@ -5,19 +5,22 @@ import argparse
 import psutil
 
 from iw_agent.cli.output import (
-    DIM,
+    GREEN,
+    RED,
+    YELLOW,
     _c,
     _reset,
     emit_models,
+    format_field,
     format_memory_meter,
     format_meter,
     format_optional,
     format_percent,
     print_empty,
-    print_info_card,
+    print_info_box,
     print_insight,
     print_report,
-    print_section,
+    print_status_box,
     process_load_details,
 )
 from iw_agent.cli.parser import add_limit_flag
@@ -57,17 +60,17 @@ def _render_process_card(process: Process, rank: int, system_ram_total: int) -> 
     lines = [
         format_meter("CPU", process.cpu_percent or 0.0),
         format_memory_meter(process.memory_rss_bytes, system_ram_total),
-        f"{_c(DIM)}runs as:{_reset()} {_owner_label(process)}",
-        f"{_c(DIM)}pid {process.pid}{_reset()}",
+        format_field("Runs as", _owner_label(process)),
+        format_field("PID", str(process.pid)),
     ]
 
     if process.command_line:
         command = process.command_line
         if len(command) > 72:
             command = f"{command[:69]}..."
-        lines.append(f"{_c(DIM)}cmd:{_reset()} {command}")
+        lines.append(format_field("Command", command))
 
-    print_info_card(
+    print_status_box(
         badge=badge,
         title=process.process_name,
         lines=lines,
@@ -89,10 +92,14 @@ def _render_processes(processes: list[Process]) -> None:
         return
 
     print_insight(_processes_summary(processes))
-    print_section(
-        1,
-        "Top programs",
-        "Bars use real usage: CPU 0–100%, RAM as % of total server memory.",
+    print_info_box(
+        title="How to read",
+        hint="usage bars",
+        lines=[
+            format_field("CPU", "0–100% of one processor core"),
+            format_field("RAM", "percent of total server memory"),
+            format_field("Status", f"{_c(GREEN)}● IDLE{_reset()} · {_c(YELLOW)}● ACTIVE{_reset()} · {_c(RED)}● BUSY{_reset()}"),
+        ],
     )
 
     system_ram_total = psutil.virtual_memory().total

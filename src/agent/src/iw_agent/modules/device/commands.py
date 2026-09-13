@@ -3,21 +3,20 @@ from __future__ import annotations
 import argparse
 
 from iw_agent.cli.output import (
-    DIM,
     _c,
     _reset,
     emit_models,
-    format_cpu_cores_horizontal,
-    format_disk_usage_rows,
-    format_load_usage_row,
-    format_memory_usage_row,
-    format_optional,
     format_bytes,
+    format_cpu_core_meters,
+    format_disk_meters,
+    format_fields,
+    format_load_meter_line,
+    format_memory_meter_line,
+    format_optional,
     print_empty,
+    print_info_box,
     print_insight,
-    print_panel,
     print_report,
-    print_usage_lines,
 )
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.modules.device.collector import (
@@ -91,41 +90,61 @@ def _cpu_percents(metrics: DeviceMetrics) -> list[float]:
 
 
 def _render_system_info(system: DeviceSystem) -> None:
-    print_panel("System", hint="identity")
-    print(f"   {'Host':<10} {system.hostname}")
-    print(
-        f"   {'OS':<10} {system.operating_system}"
-        f" {_c(DIM)}({format_optional(system.machine)}){_reset()}"
+    print_info_box(
+        title="System",
+        hint="identity",
+        lines=format_fields(
+            [
+                ("Host", system.hostname),
+                (
+                    "OS",
+                    f"{system.operating_system} {_c(DIM)}({format_optional(system.machine)}){_reset()}",
+                ),
+                ("Reboot", format_optional(system.boot_time)),
+            ]
+        ),
     )
-    print(f"   {'Reboot':<10} {format_optional(system.boot_time)}")
-    print()
 
 
 def _render_workload(metrics: DeviceMetrics) -> None:
-    print_panel("CPU", hint="green · yellow · red by usage")
-    print_usage_lines(format_cpu_cores_horizontal(_cpu_percents(metrics)))
-
-    print_panel("Memory", hint="RAM used right now")
-    print(format_memory_usage_row(metrics.memory_used_bytes, metrics.memory_total_bytes))
-    print()
-
-    print_panel("Load", hint="how busy the queue is")
-    print(
-        format_load_usage_row(
-            metrics.load_1,
-            metrics.load_5,
-            metrics.load_15,
-            metrics.cpu_count_logical,
-        )
+    print_info_box(
+        title="CPU",
+        hint="usage bars — green · yellow · red",
+        lines=format_cpu_core_meters(_cpu_percents(metrics)),
     )
-    print()
 
-    print_panel("Network", hint="since last boot")
-    print(
-        f"   {'Traffic':<10} received {format_bytes(metrics.net_rx_bytes)}"
-        f" · sent {format_bytes(metrics.net_tx_bytes)}"
+    print_info_box(
+        title="Memory",
+        hint="RAM used right now",
+        lines=[format_memory_meter_line(metrics.memory_used_bytes, metrics.memory_total_bytes)],
     )
-    print()
+
+    print_info_box(
+        title="Load",
+        hint="how busy the process queue is",
+        lines=[
+            format_load_meter_line(
+                metrics.load_1,
+                metrics.load_5,
+                metrics.load_15,
+                metrics.cpu_count_logical,
+            )
+        ],
+    )
+
+    print_info_box(
+        title="Network",
+        hint="traffic since last boot",
+        lines=format_fields(
+            [
+                (
+                    "Traffic",
+                    f"received {format_bytes(metrics.net_rx_bytes)}"
+                    f" · sent {format_bytes(metrics.net_tx_bytes)}",
+                )
+            ]
+        ),
+    )
 
 
 def _render_device(snapshot: DeviceSnapshot) -> None:
@@ -167,8 +186,6 @@ def _render_disks(
         print_insight(_disks_summary(disks))
 
     if not disks:
-        if not embedded:
-            print_panel("Disks", hint="storage partitions")
         print_empty(
             "no disks found",
             "The agent could not read disk usage.",
@@ -176,12 +193,13 @@ def _render_disks(
         )
         return
 
-    print_panel("Disks", hint="green · yellow · red by fill level")
-    print_usage_lines(
-        format_disk_usage_rows(
+    print_info_box(
+        title="Disks",
+        hint="fill level — green · yellow · red",
+        lines=format_disk_meters(
             [(disk.mount_point, disk.used_bytes, disk.total_bytes) for disk in disks],
             label_width=12,
-        )
+        ),
     )
 
 

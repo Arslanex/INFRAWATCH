@@ -37,6 +37,15 @@ MAGENTA = "\033[35m"
 STRIKE = "\033[9m"
 
 COLUMN_COLORS = (CYAN, YELLOW, GREEN, BLUE, MAGENTA)
+INFO_BOX_COLOR = MAGENTA
+_BOX_WIDTH = 44
+_TONE_BORDERS = {
+    "ok": GREEN,
+    "warn": YELLOW,
+    "bad": RED,
+    "off": DIM,
+    "info": INFO_BOX_COLOR,
+}
 
 
 def clear_screen() -> None:
@@ -96,14 +105,78 @@ def print_spacer() -> None:
     print()
 
 
-def print_panel(title: str, *, hint: str | None = None) -> None:
+def format_field(label: str, value: str) -> str:
+    return f"{_c(BOLD)}{label}{_reset()}: {value}"
+
+
+def format_fields(rows: list[tuple[str, str]]) -> list[str]:
+    return [format_field(label, value) for label, value in rows]
+
+
+def status_badge(text: str, tone: str) -> str:
+    color = _TONE_BORDERS.get(tone, GREEN)
+    bullet = "○" if tone == "off" else "●"
+    if _plain_mode:
+        return f"[{text}]"
+    return f"{_c(color)}{bullet} {text}{_reset()}"
+
+
+def _print_box_top(border: str, header: str) -> None:
+    print(f"   {_c(border)}┌─ {header}{_reset()}")
+
+
+def _print_box_line(border: str, line: str) -> None:
+    print(f"   {_c(border)}│{_reset()} {line}")
+
+
+def _print_box_bottom(border: str) -> None:
+    print(f"   {_c(border)}└{'─' * _BOX_WIDTH}{_reset()}")
     print()
-    print(f"   {_c(BOLD)}{title}{_reset()}", end="")
+
+
+def print_info_box(
+    *,
+    title: str,
+    lines: list[str],
+    hint: str | None = None,
+) -> None:
+    header = f"{_c(BOLD)}{title}{_reset()}"
     if hint:
-        print(f"  {_c(DIM)}{hint}{_reset()}", end="")
+        header = f"{header}: {_c(DIM)}{hint}{_reset()}"
+    _print_box_top(INFO_BOX_COLOR, header)
+    for line in lines:
+        _print_box_line(INFO_BOX_COLOR, line)
+    _print_box_bottom(INFO_BOX_COLOR)
+
+
+def print_status_box(
+    *,
+    badge: str,
+    title: str,
+    lines: list[str],
+    tone: str = "ok",
+    strike_title: bool = False,
+) -> None:
+    border = _TONE_BORDERS.get(tone, GREEN)
+    display_title = format_strikethrough(title) if strike_title else f"{_c(BOLD)}{title}{_reset()}"
+    _print_box_top(border, badge)
+    _print_box_line(border, display_title)
+    for line in lines:
+        _print_box_line(border, line)
+    _print_box_bottom(border)
+
+
+def print_group_heading(title: str, hint: str | None = None) -> None:
     print()
-    print(f"   {_c(DIM)}{'─' * 46}{_reset()}")
+    text = f"{_c(BOLD)}{title}{_reset()}"
+    if hint:
+        text = f"{text}: {_c(DIM)}{hint}{_reset()}"
+    print(f"   {text}")
     print()
+
+
+def print_panel(title: str, *, hint: str | None = None) -> None:
+    print_group_heading(title, hint)
 
 
 def print_labeled_rows(rows: list[tuple[str, str]]) -> None:
@@ -276,13 +349,19 @@ def format_horizontal_bar(
     width: int = 28,
     severity: bool = True,
 ) -> str:
-    filled = min(width, max(0, int(round(width * percent / 100))))
-    full, _, empty = _bar_chars()
-    color = _usage_color(percent) if severity else CYAN
-    return (
-        f"{_c(color)}{full * filled}{_reset()}"
-        f"{_c(DIM)}{empty * (width - filled)}{_reset()}"
-    )
+    clamped = min(100.0, max(0.0, percent))
+    exact_fill = (clamped / 100.0) * width
+    full_count = int(exact_fill)
+    has_half = (exact_fill - full_count) >= 0.5 and full_count < width
+    empty_count = width - full_count - (1 if has_half else 0)
+
+    full, partial, empty = _bar_chars()
+    color = _usage_color(clamped) if severity else MAGENTA
+    bar = f"{_c(color)}{full * full_count}{_reset()}"
+    if has_half:
+        bar += f"{_c(color)}{partial}{_reset()}"
+    bar += f"{_c(DIM)}{empty * empty_count}{_reset()}"
+    return bar
 
 
 def format_cpu_line(percent: float | None, cores: int | None) -> str:
@@ -293,33 +372,42 @@ def format_cpu_line(percent: float | None, cores: int | None) -> str:
     return f"{_c(color)}{format_percent(percent)}{_reset()} across {core_text}"
 
 
+def format_usage_meter(
+    label: str,
+    percent: float,
+    detail: str = "",
+    *,
+    width: int = 22,
+    label_width: int = 8,
+) -> str:
+    line = format_meter(label, percent, width=width, label_width=label_width)
+    if detail:
+        return f"{line}  {_c(DIM)}{detail}{_reset()}"
+    return line
+
+
 def format_usage_row(
     label: str,
     percent: float,
     detail: str,
     *,
-    width: int = 30,
+    width: int = 22,
     label_width: int = 10,
 ) -> str:
-    bar = format_horizontal_bar(percent, width=width)
-    return (
-        f"   {label:<{label_width}} [{bar}]"
-        f"  {format_percent(percent, colorize=True)}"
-        f"  {_c(DIM)}{detail}{_reset()}"
-    )
+    return f"   {format_usage_meter(label, percent, detail, width=width)}"
 
 
-def format_cpu_cores_horizontal(
+def format_cpu_core_meters(
     percents: list[float],
     *,
-    width: int = 30,
+    width: int = 22,
 ) -> list[str]:
     if not percents:
-        return ["   unknown"]
+        return ["unknown"]
 
     average = sum(percents) / len(percents)
     lines = [
-        format_usage_row(
+        format_usage_meter(
             "Overall",
             average,
             f"{len(percents)} cores",
@@ -327,60 +415,47 @@ def format_cpu_cores_horizontal(
         )
     ]
     for index, percent in enumerate(percents):
-        lines.append(
-            format_usage_row(
-                f"Core {index}",
-                percent,
-                "",
-                width=width,
-            )
-        )
+        lines.append(format_usage_meter(f"Core {index}", percent, width=width))
     return lines
 
 
-def format_memory_usage_row(
+def format_memory_meter_line(
     used: int | None,
     total: int | None,
     *,
-    width: int = 30,
+    width: int = 22,
 ) -> str:
     if used is None or total is None or total <= 0:
-        return "   unknown"
-    percent = (used / total) * 100
-    return format_usage_row(
-        "RAM",
-        percent,
-        f"{format_bytes(used)} / {format_bytes(total)}",
-        width=width,
-    )
+        return "RAM  [----------------------] unknown"
+    return format_memory_meter(used, total, width=width)
 
 
-def format_load_usage_row(
+def format_load_meter_line(
     load_1: float | None,
     load_5: float | None,
     load_15: float | None,
     cores: int | None,
     *,
-    width: int = 30,
+    width: int = 22,
 ) -> str:
     if load_1 is None:
-        return "   unknown"
+        return "Load [----------------------] unknown"
 
     load_5_text = f"{load_5:.2f}" if load_5 is not None else "?"
     load_15_text = f"{load_15:.2f}" if load_15 is not None else "?"
     detail = f"now {load_1:.2f} · 5m {load_5_text} · 15m {load_15_text}"
     percent = min(100.0, (load_1 / cores) * 100) if cores and cores > 0 else min(100.0, load_1 * 100)
-    return format_usage_row("Load", percent, detail, width=width)
+    return format_usage_meter("Load", percent, detail, width=width)
 
 
-def format_disk_usage_rows(
+def format_disk_meters(
     partitions: list[tuple[str, int, int]],
     *,
-    width: int = 30,
+    width: int = 22,
     label_width: int = 10,
 ) -> list[str]:
     if not partitions:
-        return ["   unknown"]
+        return ["unknown"]
 
     lines: list[str] = []
     for mount, used, total in partitions:
@@ -389,15 +464,14 @@ def format_disk_usage_rows(
         percent = (used / total) * 100
         label = mount if len(mount) <= label_width else mount[: label_width - 1] + "…"
         lines.append(
-            format_usage_row(
+            format_usage_meter(
                 label,
                 percent,
                 f"{format_bytes(used)} / {format_bytes(total)}",
                 width=width,
-                label_width=label_width,
             )
         )
-    return lines or ["   unknown"]
+    return lines or ["unknown"]
 
 
 def print_usage_lines(lines: list[str]) -> None:
@@ -446,18 +520,16 @@ def format_strikethrough(text: str) -> str:
 
 def format_nginx_status_badge(*, site_enabled: bool) -> str:
     if site_enabled:
-        return f"{_c(GREEN)}● LIVE{_reset()}" if not _plain_mode else "[LIVE]"
-    return f"{_c(DIM)}○ OFF{_reset()}" if not _plain_mode else "[OFF]"
+        return status_badge("LIVE", "ok")
+    return status_badge("OFF", "off")
 
 
 def format_nginx_security(*, site_enabled: bool, ssl_enabled: bool) -> str:
     if not site_enabled:
         return f"{_c(DIM)}inactive — not loaded by nginx{_reset()}"
     if ssl_enabled:
-        lock = "LOCK" if _plain_mode else "🔒"
-        return f"{_c(GREEN)}{lock} HTTPS{_reset()} {_c(DIM)}encrypted traffic{_reset()}"
-    unlock = "OPEN" if _plain_mode else "🔓"
-    return f"{_c(YELLOW)}{unlock} HTTP{_reset()} {_c(DIM)}no TLS on this site{_reset()}"
+        return f"{_c(GREEN)}HTTPS{_reset()} {_c(DIM)}encrypted traffic{_reset()}"
+    return f"{_c(YELLOW)}HTTP only{_reset()} {_c(DIM)}no TLS on this site{_reset()}"
 
 
 def format_nginx_exposure(ports: list[int]) -> str:
@@ -465,26 +537,8 @@ def format_nginx_exposure(ports: list[int]) -> str:
         return f"{_c(DIM)}no listen ports found{_reset()}"
     port_text = ", ".join(str(port) for port in sorted(ports))
     if any(port in {80, 443, 8080, 8443} for port in ports):
-        globe = "PUBLIC" if _plain_mode else "🌐"
-        return f"{_c(CYAN)}{globe}{_reset()} {port_text}"
+        return f"{_c(GREEN)}PUBLIC{_reset()} {port_text}"
     return port_text
-
-
-def print_site_card(
-    *,
-    site_enabled: bool,
-    title: str,
-    lines: list[str],
-) -> None:
-    tone = "ok" if site_enabled else "off"
-    badge = format_nginx_status_badge(site_enabled=site_enabled)
-    print_info_card(
-        badge=badge,
-        title=title,
-        lines=lines,
-        tone=tone,
-        strike_title=not site_enabled,
-    )
 
 
 def print_info_card(
@@ -495,27 +549,20 @@ def print_info_card(
     tone: str = "ok",
     strike_title: bool = False,
 ) -> None:
-    border_by_tone = {
-        "ok": CYAN,
-        "warn": YELLOW,
-        "bad": RED,
-        "off": DIM,
-    }
-    border = border_by_tone.get(tone, CYAN)
-    display_title = format_strikethrough(title) if strike_title else title
-
-    print(f"   {_c(border)}┌─ {badge}{_reset()}")
-    print(f"   {_c(border)}│{_reset()} {display_title}")
-    for line in lines:
-        print(f"   {_c(border)}│{_reset()} {line}")
-    print(f"   {_c(border)}└{'─' * 44}{_reset()}")
-    print()
+    print_status_box(
+        badge=badge,
+        title=title,
+        lines=lines,
+        tone=tone,
+        strike_title=strike_title,
+    )
 
 
-def cert_expiry_details(not_after: datetime | None) -> tuple[str, str, float, str]:
+def cert_expiry_details(not_after: datetime | None) -> tuple[str, str, str, float, str]:
     if not_after is None:
         return (
-            f"{_c(DIM)}? UNKNOWN{_reset()}",
+            status_badge("UNKNOWN", "off"),
+            "UNKNOWN",
             "expiry date unknown",
             0.0,
             "off",
@@ -528,28 +575,32 @@ def cert_expiry_details(not_after: datetime | None) -> tuple[str, str, float, st
 
     if days < 0:
         return (
-            f"{_c(RED)}EXPIRED{_reset()}",
+            status_badge("EXPIRED", "bad"),
+            "EXPIRED",
             f"expired on {date_text} ({abs(days)} days ago)",
             0.0,
             "bad",
         )
     if days <= 14:
         return (
-            f"{_c(YELLOW)}RENEW SOON{_reset()}",
+            status_badge("RENEW SOON", "warn"),
+            "RENEW SOON",
             f"valid until {date_text} ({days} days left)",
             max(5.0, (days / 90) * 100),
             "warn",
         )
     if days <= 30:
         return (
-            f"{_c(YELLOW)}EXPIRING{_reset()}",
+            status_badge("EXPIRING", "warn"),
+            "EXPIRING",
             f"valid until {date_text} ({days} days left)",
             (days / 90) * 100,
             "warn",
         )
 
     return (
-        f"{_c(GREEN)}VALID{_reset()}",
+        status_badge("VALID", "ok"),
+        "VALID",
         f"valid until {date_text} ({days} days left)",
         min(100.0, (days / 90) * 100),
         "ok",
@@ -559,19 +610,23 @@ def cert_expiry_details(not_after: datetime | None) -> tuple[str, str, float, st
 def process_load_details(cpu_percent: float | None) -> tuple[str, str]:
     cpu = cpu_percent or 0.0
     if cpu >= 50:
-        badge = "BUSY" if _plain_mode else "🔥 BUSY"
-        return f"{_c(RED)}{badge}{_reset()}", "bad"
+        return status_badge("BUSY", "bad"), "bad"
     if cpu >= 10:
-        badge = "ACTIVE" if _plain_mode else "⚡ ACTIVE"
-        return f"{_c(YELLOW)}{badge}{_reset()}", "warn"
-    badge = "IDLE" if _plain_mode else "💤 IDLE"
-    return f"{_c(GREEN)}{badge}{_reset()}", "ok"
+        return status_badge("ACTIVE", "warn"), "warn"
+    return status_badge("IDLE", "ok"), "ok"
 
 
-def format_meter(label: str, percent: float, *, width: int = 22) -> str:
+def format_meter(
+    label: str,
+    percent: float,
+    *,
+    width: int = 22,
+    label_width: int = 4,
+) -> str:
     clamped = min(100.0, max(0.0, percent))
     bar = format_horizontal_bar(clamped, width=width)
-    return f"{label:<4} [{bar}] {clamped:4.1f}%"
+    display = label if len(label) <= label_width else label[:label_width]
+    return f"{display:<{label_width}} [{bar}] {clamped:4.1f}%"
 
 
 def format_memory_meter(

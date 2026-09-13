@@ -4,20 +4,18 @@ import argparse
 from collections import defaultdict
 
 from iw_agent.cli.output import (
-    BOLD,
-    DIM,
-    GREEN,
-    RED,
-    _c,
-    _reset,
     emit_models,
     format_cron_schedule_hint,
     format_exit_code,
+    format_field,
+    format_fields,
     print_empty,
-    print_field_rows,
+    print_group_heading,
+    print_info_box,
     print_insight,
-    print_panel,
     print_report,
+    print_status_box,
+    status_badge,
 )
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.modules.cron.collector import collect_cron_jobs
@@ -26,8 +24,6 @@ from iw_agent.modules.cron.state_manager import (
     DEFAULT_EXECUTION_HISTORY_TAIL,
     collect_cron_executions,
 )
-
-_FIELD_WIDTH = 11
 
 
 async def run_cron(args: argparse.Namespace) -> None:
@@ -63,24 +59,25 @@ def _job_title(job: CronJob) -> str:
 
 def _render_cron_job(job: CronJob) -> None:
     schedule_hint = format_cron_schedule_hint(job.cron_expression)
-    title = _job_title(job)
-
-    print(f"   {_c(BOLD)}{title}{_reset()}")
-    print(f"   {'-' * 48}")
-
-    rows: list[tuple[str, str]] = [
-        ("Status", f"{_c(GREEN)}SCHEDULED{_reset()}"),
-        ("Why", "runs automatically on this server's clock"),
-        ("Schedule", job.cron_expression),
-        ("When", f"{schedule_hint}  {_c(DIM)}(plain-English hint){_reset()}"),
-        ("Runs as", job.owner),
-        ("Command", job.command if len(job.command) <= 72 else f"{job.command[:69]}..."),
+    lines = [
+        format_field("Why", "runs automatically on this server's clock"),
+        format_field("Schedule", job.cron_expression),
+        format_field("When", schedule_hint),
+        format_field("Runs as", job.owner),
+        format_field(
+            "Command",
+            job.command if len(job.command) <= 72 else f"{job.command[:69]}...",
+        ),
     ]
     if job.output_log_path:
-        rows.append(("Log", job.output_log_path))
+        lines.append(format_field("Log", job.output_log_path))
 
-    print_field_rows(rows, label_width=_FIELD_WIDTH)
-    print()
+    print_status_box(
+        badge=status_badge("SCHEDULED", "ok"),
+        title=_job_title(job),
+        lines=lines,
+        tone="ok",
+    )
 
 
 def _group_jobs_by_owner(jobs: list[CronJob]) -> list[tuple[str, list[CronJob]]]:
@@ -109,53 +106,51 @@ def _render_cron(jobs: list[CronJob]) -> None:
 
     print_insight(_cron_summary(jobs))
 
-    print_panel("How to read", hint="field guide")
-    print_field_rows(
-        [
-            ("Schedule", "cron expression (minute hour day month weekday)"),
-            ("When", "plain-English summary of the schedule"),
-            ("Runs as", "user account that executes the command"),
-            ("Command", "shell command that runs on schedule"),
-            ("Log", "InfraWatch run log path, if configured"),
-        ],
-        label_width=_FIELD_WIDTH,
+    print_info_box(
+        title="How to read",
+        hint="field guide",
+        lines=format_fields(
+            [
+                ("Schedule", "cron expression (minute hour day month weekday)"),
+                ("When", "plain-English summary of the schedule"),
+                ("Runs as", "user account that executes the command"),
+                ("Command", "shell command that runs on schedule"),
+                ("Log", "InfraWatch run log path, if configured"),
+            ]
+        ),
     )
-    print()
 
     for owner, owner_jobs in _group_jobs_by_owner(jobs):
-        print_panel(owner, hint=f"{len(owner_jobs)} job(s)")
+        print_group_heading(owner, f"{len(owner_jobs)} job(s)")
         for job in owner_jobs:
             _render_cron_job(job)
 
 
-def _history_title(execution: CronJobExecution) -> str:
-    return execution.job_log_path.rsplit("/", 1)[-1]
-
-
-def _history_status_fields(execution: CronJobExecution) -> list[tuple[str, str]]:
-    ok = execution.exit_code == 0
-    if ok:
-        return [
-            ("Result", format_exit_code(execution.exit_code)),
-            ("Why", "job finished without errors"),
-        ]
-    return [
-        ("Result", format_exit_code(execution.exit_code)),
-        ("Why", "check the log file for error output"),
-    ]
+def _history_badge(execution: CronJobExecution) -> tuple[str, str]:
+    if execution.exit_code == 0:
+        return status_badge("OK (0)", "ok"), "ok"
+    return status_badge(f"FAILED ({execution.exit_code})", "bad"), "bad"
 
 
 def _render_history_entry(execution: CronJobExecution) -> None:
-    print(f"   {_c(BOLD)}{_history_title(execution)}{_reset()}")
-    print(f"   {'-' * 48}")
-
-    rows = [
-        *_history_status_fields(execution),
-        ("When", execution.started_at.strftime("%Y-%m-%d %H:%M UTC")),
-        ("Log", execution.job_log_path),
+    badge, tone = _history_badge(execution)
+    why = (
+        "job finished without errors"
+        if execution.exit_code == 0
+        else "check the log file for error output"
+    )
+    lines = [
+        format_field("Why", why),
+        format_field("When", execution.started_at.strftime("%Y-%m-%d %H:%M UTC")),
+        format_field("Log", execution.job_log_path),
     ]
-    print_field_rows(rows, label_width=_FIELD_WIDTH)
-    print()
+
+    print_status_box(
+        badge=badge,
+        title=execution.job_log_path.rsplit("/", 1)[-1],
+        lines=lines,
+        tone=tone,
+    )
 
 
 def _group_executions(
@@ -184,21 +179,22 @@ def _render_cron_history(executions: list[CronJobExecution]) -> None:
 
     print_insight(_cron_history_summary(executions))
 
-    print_panel("How to read", hint="field guide")
-    print_field_rows(
-        [
-            ("Result", f"{_c(GREEN)}OK (0){_reset()} = success  |  {_c(RED)}failed (N){_reset()} = error"),
-            ("When", "UTC timestamp when the job started"),
-            ("Log", "path to the .runs log file on this server"),
-        ],
-        label_width=_FIELD_WIDTH,
+    print_info_box(
+        title="How to read",
+        hint="field guide",
+        lines=format_fields(
+            [
+                ("Result", f"{format_exit_code(0)} = success  |  failed (N) = error"),
+                ("When", "UTC timestamp when the job started"),
+                ("Log", "path to the .runs log file on this server"),
+            ]
+        ),
     )
-    print()
 
     for panel_title, panel_hint, group in _group_executions(executions):
         if not group:
             continue
-        print_panel(panel_title, hint=panel_hint)
+        print_group_heading(panel_title, panel_hint)
         for execution in group:
             _render_history_entry(execution)
 

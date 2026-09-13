@@ -4,18 +4,16 @@ import argparse
 from collections import defaultdict
 
 from iw_agent.cli.output import (
-    CYAN,
-    DIM,
-    _c,
-    _reset,
     emit_models,
+    format_field,
     format_optional,
     format_state,
     print_empty,
-    print_info_card,
+    print_group_heading,
     print_insight,
     print_report,
-    print_section,
+    print_status_box,
+    status_badge,
 )
 from iw_agent.cli.parser import add_limit_flag, add_timeout_flag
 from iw_agent.cli.registry import CliCommandSpec
@@ -63,33 +61,31 @@ def _format_ports(ports: list[PublishedPort]) -> str:
 def _container_badge(state: str) -> tuple[str, str]:
     lowered = state.lower()
     if lowered == "running":
-        return f"{_c(CYAN)}● RUNNING{_reset()}", "ok"
+        return status_badge("RUNNING", "ok"), "ok"
     if lowered in {"exited", "stopped", "dead"}:
-        return f"{_c(DIM)}○ STOPPED{_reset()}", "off"
-    return f"{_c(YELLOW)}~ {state.upper()}{_reset()}", "warn"
+        return status_badge("STOPPED", "off"), "off"
+    return status_badge(state.upper(), "warn"), "warn"
 
 
 def _render_container_card(container: Container) -> None:
     badge, tone = _container_badge(container.state)
     lines = [
-        f"{_c(DIM)}project:{_reset()} {format_optional(container.compose_project_name, fallback='—')}",
-        f"{_c(DIM)}image:{_reset()} {container.image_name}",
+        format_field("Project", format_optional(container.compose_project_name, fallback="—")),
+        format_field("Image", container.image_name),
     ]
 
     if container.compose_service_name:
-        lines.append(
-            f"{_c(DIM)}service:{_reset()} {container.compose_service_name}"
-        )
+        lines.append(format_field("Service", container.compose_service_name))
 
     lines.extend(
         [
-            f"{_c(DIM)}status:{_reset()} {format_state(container.state)}",
-            f"{_c(DIM)}ports:{_reset()} {_format_ports(container.published_ports)}",
-            f"{_c(DIM)}id:{_reset()} {container.container_id[:12]}",
+            format_field("Status", format_state(container.state)),
+            format_field("Ports", _format_ports(container.published_ports)),
+            format_field("ID", container.container_id[:12]),
         ]
     )
 
-    print_info_card(
+    print_status_box(
         badge=badge,
         title=container.container_name,
         lines=lines,
@@ -126,17 +122,12 @@ def _render_containers(containers: list[Container]) -> None:
 
     print_insight(_containers_summary(containers))
 
-    step = 1
     for project_name, project_containers in _group_containers(containers):
         if project_name == "standalone":
-            title = "Standalone containers"
-            description = "Containers not tied to a docker compose project."
+            print_group_heading("Standalone containers", "not tied to a compose project")
         else:
-            title = f"Project: {project_name}"
-            description = "Containers started together by docker compose."
+            print_group_heading(f"Project: {project_name}", "started by docker compose")
 
-        print_section(step, title, description)
-        step += 1
         for container in sorted(project_containers, key=lambda row: row.container_name.lower()):
             _render_container_card(container)
 

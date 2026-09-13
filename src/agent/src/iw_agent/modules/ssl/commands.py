@@ -4,26 +4,26 @@ import argparse
 from datetime import datetime, timezone
 
 from iw_agent.cli.output import (
-    BOLD,
     DIM,
     _c,
     _reset,
     cert_expiry_details,
     emit_models,
-    format_horizontal_bar,
+    format_field,
+    format_fields,
+    format_meter,
     format_optional,
     format_strikethrough,
     print_empty,
-    print_field_rows,
+    print_group_heading,
+    print_info_box,
     print_insight,
-    print_panel,
     print_report,
+    print_status_box,
 )
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.modules.ssl.collector import DEFAULT_CERTBOT_LIVE_DIR, collect_certificates
 from iw_agent.modules.ssl.schemas import Certificate
-
-_FIELD_WIDTH = 11
 
 
 async def run_certs(args: argparse.Namespace) -> None:
@@ -59,38 +59,39 @@ def _certs_summary(certificates: list[Certificate]) -> str:
     return f"{len(certificates)} cert(s): {valid} valid, {expiring} expiring, {expired} expired."
 
 
-def _why_field(tone: str) -> tuple[str, str]:
+def _why_text(tone: str) -> str:
     if tone == "bad":
-        return ("Why", "HTTPS visitors will see security warnings")
+        return "HTTPS visitors will see security warnings"
     if tone == "warn":
-        return ("Why", "renew before expiry to avoid downtime")
+        return "renew before expiry to avoid downtime"
     if tone == "ok":
-        return ("Why", "protects HTTPS traffic for this domain")
-    return ("Why", "expiry date could not be read from file")
+        return "protects HTTPS traffic for this domain"
+    return "expiry date could not be read from file"
 
 
 def _render_certificate(certificate: Certificate) -> None:
-    status_label, expiry_text, bar_percent, tone = cert_expiry_details(certificate.not_after)
-    bar = format_horizontal_bar(bar_percent, width=28)
-
+    badge, _status, expiry_text, bar_percent, tone = cert_expiry_details(certificate.not_after)
     title = certificate.domain
     if tone == "bad":
         title = format_strikethrough(title)
 
-    print(f"   {_c(BOLD)}{title}{_reset()}")
-    print(f"   {'-' * 48}")
-
-    rows = [
-        ("Status", status_label),
-        _why_field(tone),
-        ("Expires", expiry_text),
-        ("Time left", f"[{bar}]  {_c(DIM)}({bar_percent:.0f}% of 90-day window){_reset()}"),
-        ("Issuer", format_optional(certificate.issuer, fallback="unknown")),
-        ("Source", certificate.source),
-        ("File", certificate.cert_path),
+    lines = [
+        format_field("Why", _why_text(tone)),
+        format_field("Expires", expiry_text),
+        format_meter("Left", bar_percent)
+        + f"  {_c(DIM)}({bar_percent:.0f}% of 90-day window){_reset()}",
+        format_field("Issuer", format_optional(certificate.issuer, fallback="unknown")),
+        format_field("Source", certificate.source),
+        format_field("File", certificate.cert_path),
     ]
-    print_field_rows(rows, label_width=_FIELD_WIDTH)
-    print()
+
+    print_status_box(
+        badge=badge,
+        title=title,
+        lines=lines,
+        tone=tone,
+        strike_title=tone == "bad",
+    )
 
 
 def _group_certificates(
@@ -142,23 +143,24 @@ def _render_certs(certificates: list[Certificate]) -> None:
 
     print_insight(_certs_summary(certificates))
 
-    print_panel("How to read", hint="field guide")
-    print_field_rows(
-        [
-            ("Status", "VALID / EXPIRING / RENEW SOON / EXPIRED"),
-            ("Expires", "last day the certificate works"),
-            ("Time left", "bar shows remaining time (90-day scale)"),
-            ("Source", "certbot, nginx path, or other"),
-            ("File", "certificate path on this server"),
-        ],
-        label_width=_FIELD_WIDTH,
+    print_info_box(
+        title="How to read",
+        hint="field guide",
+        lines=format_fields(
+            [
+                ("Status", "VALID / EXPIRING / RENEW SOON / EXPIRED"),
+                ("Expires", "last day the certificate works"),
+                ("Left", "bar shows remaining time on a 90-day scale"),
+                ("Source", "certbot, nginx path, or other"),
+                ("File", "certificate path on this server"),
+            ]
+        ),
     )
-    print()
 
     for panel_title, panel_hint, group in _group_certificates(certificates):
         if not group:
             continue
-        print_panel(panel_title, hint=panel_hint)
+        print_group_heading(panel_title, panel_hint)
         for certificate in group:
             _render_certificate(certificate)
 
