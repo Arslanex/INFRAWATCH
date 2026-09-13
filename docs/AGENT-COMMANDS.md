@@ -103,14 +103,17 @@ Reload, enable, and disable run through the module executor (`sudo` required). `
 
 Action params: `domain`, `email` (obtain), `method` (`auto`/`nginx`/`webroot`), `staging`, `webroot`.
 
-**Config editor (`-i` → site → Edit configuration):**
+**Site hub (`-i` → site):** HTTPS (if needed) · Configure · Enable/Disable · Reload · More
 
-| Section | What you can change |
-|---------|---------------------|
-| Redirects | Toggle HTTP→HTTPS and www→apex redirect blocks |
-| Backend / proxy | Set `proxy_pass` or remove it |
-| Static files | Set `root`, `index`, `try_files` (standard or SPA preset), or remove `try_files` |
-| Security headers | Presets: **Basic** (frame/options/referrer), **Strict** (+ HSTS, needs HTTPS), **None** (remove managed headers) |
+**Configure (`-i` → site → Configure site):**
+
+| Group | Sub-sections |
+|-------|----------------|
+| Traffic | Backend, Paths, Static files |
+| Domain & redirects | Names/ports, Redirects |
+| Security | Header presets (Basic / Strict / None) |
+
+Navigation: `b` back · `q` quit
 
 Changes are written to the site config file, then nginx is tested and reloaded (with confirm prompts).
 

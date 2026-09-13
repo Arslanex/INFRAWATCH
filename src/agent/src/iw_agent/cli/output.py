@@ -93,14 +93,39 @@ def print_page_divider() -> None:
 
 def print_page_header(title: str, subtitle: str) -> None:
     print()
-    print(
-        f"   {_c(_PAGE_ACCENT)}▌{_reset()} {_c(BOLD)}{title}{_reset()}"
-        f"  {_c(DIM)}{subtitle}{_reset()}"
-    )
+    if subtitle:
+        print(
+            f"   {_c(DIM)}{subtitle}{_reset()}",
+        )
+        print(f"   {_c(BOLD)}{title}{_reset()}")
+        return
+    print(f"   {_c(BOLD)}{title}{_reset()}")
 
 
 def print_page_summary(text: str) -> None:
-    print(f"   {format_label('Summary')} {_c(DIM)}{text}{_reset()}")
+    print(f"   {_c(DIM)}{text}{_reset()}")
+
+
+def print_menu_item(index: int | str, label: str, hint: str | None = None) -> None:
+    marker = f"{index:>2}." if isinstance(index, int) else f" {index} "
+    if hint:
+        print(f"  {marker} {label}  {_c(DIM)}{hint}{_reset()}")
+        return
+    print(f"  {marker} {label}")
+
+
+def print_menu_list(items: list[tuple[int | str, str, str | None]]) -> None:
+    for entry in items:
+        if len(entry) == 2:
+            print_menu_item(entry[0], entry[1])
+        else:
+            print_menu_item(entry[0], entry[1], entry[2])
+
+
+def print_nav_hint(*, allow_back: bool) -> None:
+    parts = ["b back"] if allow_back else []
+    parts.append("q quit")
+    print(f"\n   {_c(DIM)}{' · '.join(parts)}{_reset()}")
 
 
 def print_banner() -> None:

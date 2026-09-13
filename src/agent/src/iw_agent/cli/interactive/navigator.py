@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any
 
-from iw_agent.cli.output import clear_screen, print_page_header
+from iw_agent.cli.output import clear_screen, print_nav_hint, print_page_header
 
 
 class PageResult(Enum):
@@ -56,6 +56,7 @@ class Navigator:
             clear_screen()
             print_page_header(page.title, page.subtitle)
             page.render(self._context)
+            print_nav_hint(allow_back=len(self._stack) > 1)
             result = await page.handle(self._context)
 
             if result is PageResult.STAY:

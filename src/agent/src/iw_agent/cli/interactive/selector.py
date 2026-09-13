@@ -10,13 +10,7 @@ def prompt_choice(
     allow_exit: bool = True,
 ) -> int | None:
     while True:
-        hints: list[str] = []
-        if allow_back:
-            hints.append("b = back")
-        if allow_exit:
-            hints.append("q = exit")
-        hint = f" ({', '.join(hints)})" if hints else ""
-        raw = input(f"\n>{hint} ").strip().lower()
+        raw = input("\n> ").strip().lower()
 
         if allow_exit and raw in {"q", "quit", "exit"}:
             return None

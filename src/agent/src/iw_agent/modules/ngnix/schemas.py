@@ -83,9 +83,58 @@ class SiteKind(str, Enum):
     PROXY = "proxy"
 
 
+class ListenEndpoint(AgentModel):
+    port: int
+    ssl: bool = False
+    address: Optional[str] = None
+
+    def display(self) -> str:
+        if self.address == "::":
+            host = "[::]"
+        elif self.address:
+            host = self.address
+        else:
+            host = "*"
+        ssl = " ssl" if self.ssl else ""
+        return f"{host}:{self.port}{ssl}"
+
+    def to_nginx_line(self, indent: str = "") -> str:
+        ssl_part = " ssl" if self.ssl else ""
+        if self.address == "::":
+            return f"{indent}listen [::]:{self.port}{ssl_part};"
+        if self.address:
+            return f"{indent}listen {self.address}:{self.port}{ssl_part};"
+        return f"{indent}listen {self.port}{ssl_part};"
+
+
+class LocationBlock(AgentModel):
+    path: str
+    proxy_pass: Optional[str] = None
+    root: Optional[str] = None
+    alias: Optional[str] = None
+    try_files: Optional[str] = None
+
+    def summary(self) -> str:
+        if self.proxy_pass:
+            return f"proxy → {self.proxy_pass}"
+        if self.alias:
+            return f"alias {self.alias}"
+        if self.root:
+            return f"root {self.root}"
+        if self.try_files:
+            return f"try_files {self.try_files}"
+        return "empty"
+
+
 class SiteConfigSections(AgentModel):
     config_path: str
     primary_domain: str
+    server_names: list[str] = Field(default_factory=list)
+    listen_endpoints: list[ListenEndpoint] = Field(default_factory=list)
+    http_port: int = 80
+    http_listen_address: Optional[str] = None
+    listen_443_ssl: bool = False
+    locations: list[LocationBlock] = Field(default_factory=list)
     http_to_https: bool = False
     www_to_apex: bool = False
     proxy_pass: Optional[str] = None

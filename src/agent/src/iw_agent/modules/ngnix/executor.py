@@ -18,11 +18,15 @@ from iw_agent.modules.ngnix.collector import (
     _extract_server_blocks,
     _is_http_redirect_block,
     _is_www_redirect_block,
+    _listen_endpoints_from_block,
+    _prefix_locations_from_block,
     collect_virtual_hosts,
+    parse_listen_directive,
     precheck_certificate_domain,
 )
 from iw_agent.modules.ngnix.schemas import (
     DEFAULT_INDEX_FILES,
+    ListenEndpoint,
     MANAGED_SECURITY_HEADER_NAMES,
     SecurityPreset,
     SiteKind,
@@ -126,6 +130,20 @@ NGINX_SITE_ACTIONS: tuple[ActionSpec, ...] = (
         requires_root=True,
         description="Write a new sites-available config and optionally enable it",
     ),
+    ActionSpec(
+        id="apply_domain_port_settings",
+        label="Update domain and listen settings",
+        kind=ActionKind.WRITE,
+        requires_root=True,
+        description="Manage server_name and listen directives",
+    ),
+    ActionSpec(
+        id="apply_location_settings",
+        label="Update location blocks",
+        kind=ActionKind.WRITE,
+        requires_root=True,
+        description="Add, update, or remove prefix location blocks",
+    ),
 )
 
 HIDDEN_ACTION_IDS = frozenset(
@@ -135,6 +153,8 @@ HIDDEN_ACTION_IDS = frozenset(
         "apply_security_settings",
         "apply_static_settings",
         "create_site",
+        "apply_domain_port_settings",
+        "apply_location_settings",
     },
 )
 
@@ -149,6 +169,10 @@ ROOT_LINE = re.compile(r"^(\s*)root\s+([^;]+);\s*$")
 INDEX_LINE = re.compile(r"^(\s*)index\s+([^;]+);\s*$")
 TRY_FILES_LINE = re.compile(r"^(\s*)try_files\s+([^;]+);\s*$")
 LOCATION_ROOT_START = re.compile(r"^\s*location\s+/\s*\{")
+LOCATION_PREFIX_START = re.compile(r"^\s*location\s+(?P<path>/[^\s{~*]*)\s*\{")
+LISTEN_LINE = re.compile(r"^(\s*)listen\s+(?P<value>.+);\s*$")
+LOCATION_ANY_START = re.compile(r"^\s*location\s+")
+ALIAS_LINE = re.compile(r"^(\s*)alias\s+([^;]+);\s*$")
 ADD_HEADER_LINE = re.compile(
     r'^\s*add_header\s+(?P<name>[^;\s]+)\s+"(?P<value>[^"]*)"(?:\s+always)?\s*;\s*$',
 )
@@ -867,6 +891,439 @@ def patch_static_content(
     return "\n".join(lines) + trailing_newline, True, ", ".join(detail_parts)
 
 
+def _top_level_listen_indices(lines: list[str], start: int, end: int) -> list[int]:
+    indices: list[int] = []
+    for index in range(start + 1, end + 1):
+        line = lines[index]
+        if LOCATION_ANY_START.match(line):
+            break
+        if LISTEN_LINE.match(line):
+            indices.append(index)
+    return indices
+
+
+def patch_domain_port_content(
+    content: str,
+    domain: str,
+    *,
+    add_server_name: str | None = None,
+    remove_server_name: str | None = None,
+    listen_443: bool | None = None,
+    http_port: int | None = None,
+    http_listen_address: str | None = None,
+    clear_http_listen_address: bool = False,
+) -> tuple[str, bool, str]:
+    lines = content.splitlines()
+    block = _find_main_server_block(lines, domain)
+    if block is None:
+        raise ValueError(f"no server block with server_name {domain} in config")
+
+    start, end = block
+    indent = _block_indent(lines, start)
+    changed = False
+    messages: list[str] = []
+
+    if add_server_name or remove_server_name:
+        for index in range(start, end + 1):
+            match = SERVER_NAME.match(lines[index])
+            if not match:
+                continue
+            names = [part for part in match.group("names").split() if part != "_"]
+            line_indent = lines[index][: len(lines[index]) - len(lines[index].lstrip())]
+            if add_server_name:
+                if add_server_name in names:
+                    messages.append(f"server_name {add_server_name} already present")
+                else:
+                    names.append(add_server_name)
+                    lines[index] = f"{line_indent}server_name {' '.join(names)};"
+                    changed = True
+                    messages.append(f"added server_name {add_server_name}")
+            if remove_server_name:
+                if remove_server_name not in names:
+                    messages.append(f"server_name {remove_server_name} not found")
+                elif len(names) <= 1:
+                    raise ValueError("cannot remove the last server_name")
+                else:
+                    names = [name for name in names if name != remove_server_name]
+                    lines[index] = f"{line_indent}server_name {' '.join(names)};"
+                    changed = True
+                    messages.append(f"removed server_name {remove_server_name}")
+            break
+        else:
+            if add_server_name:
+                insert_at = _top_level_listen_indices(lines, start, end)
+                insert_index = insert_at[-1] + 1 if insert_at else start + 1
+                lines = lines[:insert_index] + [f"{indent}server_name {add_server_name};"] + lines[insert_index:]
+                end += 1
+                changed = True
+                messages.append(f"added server_name {add_server_name}")
+
+    block = _find_main_server_block(lines, domain)
+    if block is None:
+        raise ValueError(f"no server block with server_name {domain} in config")
+    start, end = block
+    listen_indices = _top_level_listen_indices(lines, start, end)
+    block_lines = lines[start : end + 1]
+    endpoints = _listen_endpoints_from_block(block_lines)
+
+    if listen_443 is True:
+        has_443 = any(ep.port == 443 and ep.ssl for ep in endpoints)
+        if not has_443:
+            insert_index = listen_indices[-1] + 1 if listen_indices else start + 1
+            new_lines = [
+                f"{indent}listen 443 ssl;",
+                f"{indent}listen [::]:443 ssl;",
+            ]
+            lines = lines[:insert_index] + new_lines + lines[insert_index:]
+            changed = True
+            messages.append("enabled listen 443 ssl")
+        else:
+            messages.append("listen 443 ssl already enabled")
+    elif listen_443 is False:
+        remove_indices: set[int] = set()
+        for index in listen_indices:
+            match = LISTEN_LINE.match(lines[index])
+            if not match:
+                continue
+            endpoint = parse_listen_directive(match.group("value"))
+            if endpoint and endpoint.port == 443 and endpoint.ssl:
+                remove_indices.add(index)
+        if remove_indices:
+            _remove_line_indices(lines, remove_indices)
+            changed = True
+            messages.append("disabled listen 443 ssl")
+        else:
+            messages.append("listen 443 ssl is not configured")
+
+    block = _find_main_server_block(lines, domain)
+    if block is None:
+        raise ValueError(f"no server block with server_name {domain} in config")
+    start, end = block
+    listen_indices = _top_level_listen_indices(lines, start, end)
+
+    if http_port is not None or http_listen_address is not None or clear_http_listen_address:
+        for index in listen_indices:
+            match = LISTEN_LINE.match(lines[index])
+            if not match:
+                continue
+            endpoint = parse_listen_directive(match.group("value"))
+            if endpoint is None or endpoint.ssl:
+                continue
+            if endpoint.address == "::":
+                new_port = http_port if http_port is not None else endpoint.port
+                lines[index] = f"{match.group(1)}listen [::]:{new_port};"
+                changed = True
+                continue
+
+            new_port = http_port if http_port is not None else endpoint.port
+            if clear_http_listen_address:
+                new_address = None
+            elif http_listen_address is not None:
+                new_address = http_listen_address or None
+            else:
+                new_address = endpoint.address
+
+            updated = ListenEndpoint(port=new_port, ssl=False, address=new_address)
+            lines[index] = updated.to_nginx_line(match.group(1))
+            changed = True
+
+        if http_port is not None:
+            messages.append(f"http listen port set to {http_port}")
+        if http_listen_address is not None:
+            messages.append(f"http listen bound to {http_listen_address or '*'}")
+        if clear_http_listen_address:
+            messages.append("http listen binding cleared")
+
+    if not changed:
+        detail = messages[0] if len(messages) == 1 else "; ".join(messages) or "no domain/port changes needed"
+        return content, False, detail
+
+    trailing_newline = "\n" if content.endswith("\n") else ""
+    return "\n".join(lines) + trailing_newline, True, "; ".join(messages)
+
+
+def _validate_location_path(path: str) -> str:
+    cleaned = path.strip()
+    if not cleaned.startswith("/"):
+        raise ValueError("location path must start with /")
+    if any(char in cleaned for char in {"~", "*", "$", " "}):
+        raise ValueError("only prefix locations are supported (no regex)")
+    return cleaned
+
+
+def _find_location_block(
+    lines: list[str],
+    server_start: int,
+    server_end: int,
+    path: str,
+) -> tuple[int, int] | None:
+    index = server_start + 1
+    while index <= server_end:
+        match = LOCATION_PREFIX_START.match(lines[index])
+        if not match:
+            index += 1
+            continue
+        if match.group("path") == path:
+            loc_start = index
+            depth = 0
+            while index <= server_end:
+                depth += lines[index].count("{") - lines[index].count("}")
+                index += 1
+                if depth <= 0:
+                    return loc_start, index - 1
+            return None
+        depth = 0
+        while index <= server_end:
+            depth += lines[index].count("{") - lines[index].count("}")
+            index += 1
+            if depth <= 0:
+                break
+    return None
+
+
+def _proxy_header_lines(inner_indent: str) -> list[str]:
+    return [
+        f"{inner_indent}proxy_set_header Host $host;",
+        f"{inner_indent}proxy_set_header X-Real-IP $remote_addr;",
+        f"{inner_indent}proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+        f"{inner_indent}proxy_set_header X-Forwarded-Proto $scheme;",
+    ]
+
+
+def _format_location_block_lines(
+    indent: str,
+    path: str,
+    *,
+    proxy_pass: str | None = None,
+    document_root: str | None = None,
+    alias: str | None = None,
+    try_files: str | None = None,
+) -> list[str]:
+    inner = indent + "    "
+    block_lines = [f"{indent}location {path} {{"]
+    if proxy_pass:
+        block_lines.append(f"{inner}proxy_pass {proxy_pass};")
+        block_lines.extend(_proxy_header_lines(inner))
+    if document_root:
+        block_lines.append(f"{inner}root {document_root};")
+    if alias:
+        block_lines.append(f"{inner}alias {alias};")
+    if try_files:
+        block_lines.append(f"{inner}try_files {try_files};")
+    block_lines.append(f"{indent}}}")
+    return block_lines
+
+
+def _update_location_block_lines(
+    block_lines: list[str],
+    *,
+    proxy_pass: str | None = None,
+    document_root: str | None = None,
+    alias: str | None = None,
+    try_files: str | None = None,
+    remove_proxy: bool = False,
+) -> tuple[list[str], bool]:
+    indent = _block_indent(block_lines, 0)
+    inner = indent + "    "
+    changed = False
+    proxy_done = root_done = alias_done = try_done = False
+    updated: list[str] = []
+
+    for line in block_lines:
+        proxy_match = PROXY_PASS_LINE.match(line)
+        if proxy_match and (proxy_pass is not None or remove_proxy):
+            if remove_proxy:
+                changed = True
+                proxy_done = True
+                continue
+            updated.append(f"{proxy_match.group(1)}proxy_pass {proxy_pass};")
+            changed = True
+            proxy_done = True
+            continue
+        root_match = ROOT_LINE.match(line)
+        if root_match and document_root is not None:
+            updated.append(f"{root_match.group(1)}root {document_root};")
+            changed = True
+            root_done = True
+            continue
+        alias_match = ALIAS_LINE.match(line)
+        if alias_match and alias is not None:
+            updated.append(f"{alias_match.group(1)}alias {alias};")
+            changed = True
+            alias_done = True
+            continue
+        try_match = TRY_FILES_LINE.match(line)
+        if try_match and try_files is not None:
+            updated.append(f"{try_match.group(1)}try_files {try_files};")
+            changed = True
+            try_done = True
+            continue
+        updated.append(line)
+
+    closing_index = len(updated) - 1
+    insert_lines: list[str] = []
+    if proxy_pass is not None and not remove_proxy and not proxy_done:
+        insert_lines.append(f"{inner}proxy_pass {proxy_pass};")
+        insert_lines.extend(_proxy_header_lines(inner))
+        changed = True
+    if document_root is not None and not root_done:
+        insert_lines.append(f"{inner}root {document_root};")
+        changed = True
+    if alias is not None and not alias_done:
+        insert_lines.append(f"{inner}alias {alias};")
+        changed = True
+    if try_files is not None and not try_done:
+        insert_lines.append(f"{inner}try_files {try_files};")
+        changed = True
+
+    if insert_lines:
+        updated = updated[:closing_index] + insert_lines + updated[closing_index:]
+    return updated, changed
+
+
+def patch_location_settings_content(
+    content: str,
+    domain: str,
+    *,
+    add_location_path: str | None = None,
+    update_location_path: str | None = None,
+    remove_location_path: str | None = None,
+    proxy_pass: str | None = None,
+    document_root: str | None = None,
+    alias: str | None = None,
+    try_files: str | None = None,
+    remove_proxy: bool = False,
+) -> tuple[str, bool, str]:
+    lines = content.splitlines()
+    block = _find_main_server_block(lines, domain)
+    if block is None:
+        raise ValueError(f"no server block with server_name {domain} in config")
+
+    start, end = block
+    indent = _block_indent(lines, start)
+    block_lines = lines[start : end + 1]
+    existing = _prefix_locations_from_block(block_lines)
+
+    if remove_location_path:
+        path = _validate_location_path(remove_location_path)
+        found = _find_location_block(lines, start, end, path)
+        if found is None:
+            return content, False, f"location {path} not found"
+        loc_start, loc_end = found
+        del lines[loc_start : loc_end + 1]
+        trailing_newline = "\n" if content.endswith("\n") else ""
+        return "\n".join(lines) + trailing_newline, True, f"removed location {path}"
+
+    if add_location_path:
+        path = _validate_location_path(add_location_path)
+        if any(location.path == path for location in existing):
+            return content, False, f"location {path} already exists"
+        if not any([proxy_pass, document_root, alias, try_files]):
+            raise ValueError("proxy_pass, document_root, alias, or try_files is required")
+        new_block = _format_location_block_lines(
+            indent,
+            path,
+            proxy_pass=proxy_pass,
+            document_root=document_root,
+            alias=alias,
+            try_files=try_files,
+        )
+        lines = lines[:end] + new_block + lines[end:]
+        trailing_newline = "\n" if content.endswith("\n") else ""
+        return "\n".join(lines) + trailing_newline, True, f"added location {path}"
+
+    if update_location_path:
+        path = _validate_location_path(update_location_path)
+        found = _find_location_block(lines, start, end, path)
+        if found is None:
+            return content, False, f"location {path} not found"
+        loc_start, loc_end = found
+        loc_lines = lines[loc_start : loc_end + 1]
+        updated_block, changed = _update_location_block_lines(
+            loc_lines,
+            proxy_pass=proxy_pass,
+            document_root=document_root,
+            alias=alias,
+            try_files=try_files,
+            remove_proxy=remove_proxy,
+        )
+        if not changed:
+            return content, False, f"no changes for location {path}"
+        lines = lines[:loc_start] + updated_block + lines[loc_end + 1 :]
+        trailing_newline = "\n" if content.endswith("\n") else ""
+        return "\n".join(lines) + trailing_newline, True, f"updated location {path}"
+
+    raise ValueError("add_location_path, update_location_path, or remove_location_path is required")
+
+
+async def apply_location_settings_to_config(
+    config_path: str,
+    domain: str,
+    *,
+    add_location_path: str | None = None,
+    update_location_path: str | None = None,
+    remove_location_path: str | None = None,
+    proxy_pass: str | None = None,
+    document_root: str | None = None,
+    alias: str | None = None,
+    try_files: str | None = None,
+    remove_proxy: bool = False,
+    dry_run: bool = False,
+) -> DeployResult:
+    def _patch(content: str) -> tuple[str, bool, str]:
+        return patch_location_settings_content(
+            content,
+            domain,
+            add_location_path=add_location_path,
+            update_location_path=update_location_path,
+            remove_location_path=remove_location_path,
+            proxy_pass=proxy_pass,
+            document_root=document_root,
+            alias=alias,
+            try_files=try_files,
+            remove_proxy=remove_proxy,
+        )
+
+    return await read(
+        _apply_content_patch_sync,
+        config_path,
+        _patch,
+        dry_run=dry_run,
+    )
+
+
+async def apply_domain_port_settings_to_config(
+    config_path: str,
+    domain: str,
+    *,
+    add_server_name: str | None = None,
+    remove_server_name: str | None = None,
+    listen_443: bool | None = None,
+    http_port: int | None = None,
+    http_listen_address: str | None = None,
+    clear_http_listen_address: bool = False,
+    dry_run: bool = False,
+) -> DeployResult:
+    def _patch(content: str) -> tuple[str, bool, str]:
+        return patch_domain_port_content(
+            content,
+            domain,
+            add_server_name=add_server_name,
+            remove_server_name=remove_server_name,
+            listen_443=listen_443,
+            http_port=http_port,
+            http_listen_address=http_listen_address,
+            clear_http_listen_address=clear_http_listen_address,
+        )
+
+    return await read(
+        _apply_content_patch_sync,
+        config_path,
+        _patch,
+        dry_run=dry_run,
+    )
+
+
 def generate_site_config(
     domain: str,
     *,
@@ -1130,6 +1587,8 @@ class NginxExecutor:
             "apply_security_settings",
             "apply_static_settings",
             "create_site",
+            "apply_domain_port_settings",
+            "apply_location_settings",
         }:
             return _fail(
                 request,
@@ -1916,6 +2375,97 @@ async def _create_site(
     )
 
 
+async def _apply_location_settings(
+    request: ActionRequest,
+    options: ExecutorOptions,
+    *,
+    virtual_host: VirtualHost | None,
+    config: NginxExecutorConfig,
+) -> ActionResult:
+    if virtual_host is None:
+        return _fail(request, "virtual host is required", options)
+
+    domain = _domain_for(virtual_host, request.params)
+    if not domain:
+        return _fail(request, "domain is required (server_name missing)", options)
+
+    params = request.params
+    try:
+        deploy_result = await apply_location_settings_to_config(
+            virtual_host.config_path,
+            domain,
+            add_location_path=params.get("add_location_path"),
+            update_location_path=params.get("update_location_path"),
+            remove_location_path=params.get("remove_location_path"),
+            proxy_pass=params.get("proxy_pass"),
+            document_root=params.get("document_root"),
+            alias=params.get("alias"),
+            try_files=params.get("try_files"),
+            remove_proxy=bool(params.get("remove_proxy", False)),
+            dry_run=options.dry_run,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        return _fail(request, str(exc), options)
+
+    return await _maybe_reload_after_config_change(
+        request,
+        options,
+        virtual_host=virtual_host,
+        config=config,
+        message=deploy_result.message,
+    )
+
+
+async def _apply_domain_port_settings(
+    request: ActionRequest,
+    options: ExecutorOptions,
+    *,
+    virtual_host: VirtualHost | None,
+    config: NginxExecutorConfig,
+) -> ActionResult:
+    if virtual_host is None:
+        return _fail(request, "virtual host is required", options)
+
+    domain = _domain_for(virtual_host, request.params)
+    if not domain:
+        return _fail(request, "domain is required (server_name missing)", options)
+
+    params = request.params
+    listen_443 = params.get("listen_443")
+    if listen_443 is True:
+        fullchain, _ = _cert_paths(domain, live_dir=config.certbot_live_dir)
+        has_cert = Path(fullchain).is_file() or bool(virtual_host.cert_path)
+        if not has_cert and not virtual_host.ssl_enabled:
+            return _fail(
+                request,
+                "listen 443 ssl requires a certificate — use Obtain HTTPS first",
+                options,
+            )
+
+    try:
+        deploy_result = await apply_domain_port_settings_to_config(
+            virtual_host.config_path,
+            domain,
+            add_server_name=params.get("add_server_name"),
+            remove_server_name=params.get("remove_server_name"),
+            listen_443=listen_443 if "listen_443" in params else None,
+            http_port=params.get("http_port"),
+            http_listen_address=params.get("http_listen_address"),
+            clear_http_listen_address=bool(params.get("clear_http_listen_address", False)),
+            dry_run=options.dry_run,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        return _fail(request, str(exc), options)
+
+    return await _maybe_reload_after_config_change(
+        request,
+        options,
+        virtual_host=virtual_host,
+        config=config,
+        message=deploy_result.message,
+    )
+
+
 async def _apply_backend_settings(
     request: ActionRequest,
     options: ExecutorOptions,
@@ -1973,4 +2523,6 @@ _HANDLERS = {
     "apply_security_settings": _apply_security_settings,
     "apply_static_settings": _apply_static_settings,
     "create_site": _create_site,
+    "apply_domain_port_settings": _apply_domain_port_settings,
+    "apply_location_settings": _apply_location_settings,
 }

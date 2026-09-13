@@ -7,16 +7,13 @@ from dataclasses import dataclass
 
 from iw_agent.cli.action_prompts import print_action_result
 from iw_agent.cli.action_runner import run_action_with_prompts
-from iw_agent.cli.interactive.action_menu import print_action_menu
 from iw_agent.cli.interactive.navigator import Navigator, Page, PageContext, PageResult
 from iw_agent.cli.interactive.selector import prompt_choice, prompt_yes_no
 from iw_agent.core.actions import ActionResult
 
 from iw_agent.cli.output import (
-    BLUE,
     DIM,
-    GREEN,
-    RED,
+    YELLOW,
     _c,
     _reset,
     emit_json,
@@ -31,6 +28,8 @@ from iw_agent.cli.output import (
     print_group_heading,
     print_info_box,
     print_insight,
+    print_menu_item,
+    print_menu_list,
     print_page_divider,
     print_page_summary,
     print_report,
@@ -53,7 +52,6 @@ from iw_agent.modules.ngnix.collector import (
     load_site_config_sections,
     precheck_certificate_domain,
 )
-from iw_agent.modules.ngnix.executor import HIDDEN_ACTION_IDS, NGINX_ACTIONS_BY_ID, NGINX_SITE_ACTIONS
 from iw_agent.modules.ngnix.schemas import (
     DEFAULT_INDEX_FILES,
     TRY_FILES_SPA,
@@ -382,57 +380,51 @@ COMMAND_SPECS = [
 ]
 
 
-def _actions_for_profile(profile: SiteProfile) -> list:
-    from iw_agent.core.actions import ActionSpec
-
-    items: list[ActionSpec] = []
-    if profile.ssl_status == SslStatus.NO_SSL:
-        items.append(NGINX_ACTIONS_BY_ID["secure_site"])
-    elif profile.ssl_status in {SslStatus.SSL_EXPIRING, SslStatus.SSL_EXPIRED}:
-        items.append(NGINX_ACTIONS_BY_ID["renew_site"])
-    elif profile.ssl_status == SslStatus.SSL_MISMATCH:
-        items.append(NGINX_ACTIONS_BY_ID["attach_ssl"])
-
-    for spec in NGINX_SITE_ACTIONS:
-        if spec.id in HIDDEN_ACTION_IDS:
-            continue
-        if any(existing.id == spec.id for existing in items):
-            continue
-        if spec.id in {"secure_site", "renew_site"}:
-            continue
-        items.append(spec)
-    return items
+_SSL_BADGES = {
+    SslStatus.NO_SSL: "no SSL",
+    SslStatus.SSL_OK: "HTTPS",
+    SslStatus.SSL_EXPIRING: "expiring",
+    SslStatus.SSL_EXPIRED: "expired",
+    SslStatus.SSL_MISMATCH: "mismatch",
+    SslStatus.SSL_ORPHAN: "orphan",
+}
 
 
 @dataclass(frozen=True)
-class _DetailMenuEntry:
+class _MenuItem:
     kind: str
     label: str
     action_id: str | None = None
+    hint: str | None = None
 
 
-def _detail_menu(profile: SiteProfile) -> list[_DetailMenuEntry]:
-    items = [_DetailMenuEntry("config", "Edit configuration")]
-    for spec in _actions_for_profile(profile):
-        items.append(_DetailMenuEntry("action", spec.label, spec.id))
+def _ssl_menu_item(profile: SiteProfile) -> _MenuItem | None:
+    if profile.ssl_status == SslStatus.NO_SSL:
+        return _MenuItem("action", "Set up HTTPS", "secure_site", "certificate needed")
+    if profile.ssl_status in {SslStatus.SSL_EXPIRING, SslStatus.SSL_EXPIRED}:
+        return _MenuItem("action", "Renew certificate", "renew_site")
+    if profile.ssl_status == SslStatus.SSL_MISMATCH:
+        return _MenuItem("action", "Fix certificate", "attach_ssl")
+    return None
+
+
+def _site_hub_menu(profile: SiteProfile) -> list[_MenuItem]:
+    items: list[_MenuItem] = []
+    ssl_item = _ssl_menu_item(profile)
+    if ssl_item is not None:
+        items.append(ssl_item)
+    items.append(_MenuItem("configure", "Configure site", hint="domains, traffic, security"))
+    if profile.virtual_host.enabled:
+        items.append(_MenuItem("action", "Disable site", "disable_site"))
+    else:
+        items.append(_MenuItem("action", "Enable site", "enable_site"))
+    items.append(_MenuItem("action", "Reload nginx", "reload"))
+    items.append(_MenuItem("more", "More", hint="test, details"))
     return items
 
 
-def _render_detail_menu(entries: list[_DetailMenuEntry]) -> None:
-    print_page_divider()
-    print(f"{_c(DIM)}Menu{_reset()}\n")
-    for index, entry in enumerate(entries, start=1):
-        if entry.kind == "config":
-            print(f"  {index:2}. {entry.label}  {_c(DIM)}[sections]{_reset()}")
-            continue
-        spec = NGINX_ACTIONS_BY_ID[entry.action_id or ""]
-        tag = spec.kind.value
-        root = " root" if spec.requires_root else ""
-        color = {"read": GREEN, "write": BLUE, "destructive": RED}.get(tag, BLUE)
-        print(
-            f"  {index:2}. {_c(color)}{entry.label}{_reset()}"
-            f"  {_c(DIM)}[{tag}{root}]{_reset()}",
-        )
+def _ssl_badge_short(profile: SiteProfile) -> str:
+    return _SSL_BADGES.get(profile.ssl_status, profile.ssl_status.value)
 
 
 def _base_params(context: PageContext, host: VirtualHost) -> dict:
@@ -617,16 +609,6 @@ async def _prompt_cert_action_params(action_id: str, params: dict, host: Virtual
     return True
 
 
-_SSL_BADGES = {
-    SslStatus.NO_SSL: "NO SSL",
-    SslStatus.SSL_OK: "HTTPS OK",
-    SslStatus.SSL_EXPIRING: "EXPIRING",
-    SslStatus.SSL_EXPIRED: "EXPIRED",
-    SslStatus.SSL_MISMATCH: "MISMATCH",
-    SslStatus.SSL_ORPHAN: "ORPHAN",
-}
-
-
 async def run_nginx_interactive(args: argparse.Namespace) -> None:
     prepare_command_view(plain=args.plain)
     profiles = await collect_site_profiles(
@@ -642,43 +624,29 @@ async def run_nginx_interactive(args: argparse.Namespace) -> None:
 class _InteractiveSiteListPage(Page):
     @property
     def title(self) -> str:
-        return "nginx sites"
+        return "Sites"
 
     @property
     def subtitle(self) -> str:
-        return "select a virtual host"
+        return "nginx"
 
     def render(self, context: PageContext) -> None:
         profiles: list[SiteProfile] = context.data["profiles"]
         create_index = len(profiles) + 1
 
         if not profiles:
-            print_page_summary("No sites yet — create your first nginx site")
             print_page_divider()
-            print(f"  {create_index:2}. {_c(GREEN)}Create new site{_reset()}")
+            print_menu_item(create_index, "New site")
             return
 
-        live = sum(1 for profile in profiles if profile.virtual_host.enabled)
-        needs_ssl = sum(1 for profile in profiles if profile.ssl_status == SslStatus.NO_SSL)
-        expiring = sum(
-            1
-            for profile in profiles
-            if profile.ssl_status in {SslStatus.SSL_EXPIRING, SslStatus.SSL_EXPIRED}
-        )
-        print_page_summary(
-            f"{len(profiles)} site(s)  ·  {live} live  ·  {needs_ssl} need SSL  ·  {expiring} cert issues",
-        )
         print_page_divider()
         for index, profile in enumerate(profiles, start=1):
             host = profile.virtual_host
             name = _site_title(host)
-            badge = format_nginx_status_badge(site_enabled=host.enabled)
-            ssl = _SSL_BADGES.get(profile.ssl_status, profile.ssl_status.value)
-            path = host.config_path or "-"
-            print(f"  {index:2}. {badge}  {name}  {_c(DIM)}[{ssl}]{_reset()}")
-            print(f"      {_c(DIM)}{path}{_reset()}")
-        print_page_divider()
-        print(f"  {create_index:2}. {_c(GREEN)}Create new site{_reset()}")
+            state = "live" if host.enabled else "off"
+            ssl = _ssl_badge_short(profile)
+            print_menu_item(index, name, f"{state} · {ssl}")
+        print_menu_item(create_index, "New site")
 
     async def handle(self, context: PageContext) -> PageResult | Page:
         profiles: list[SiteProfile] = context.data["profiles"]
@@ -695,19 +663,15 @@ class _InteractiveSiteListPage(Page):
 class _CreateSiteWizardPage(Page):
     @property
     def title(self) -> str:
-        return "Create new site"
+        return "New site"
 
     @property
     def subtitle(self) -> str:
-        return "nginx site wizard"
+        return "nginx"
 
     def render(self, context: PageContext) -> None:
-        print_page_summary("Answer a few questions — InfraWatch writes the config file for you")
         print_page_divider()
-        print("   1. Domain name")
-        print("   2. Site type (static files or reverse proxy)")
-        print("   3. Paths / backend URL")
-        print("   4. Enable site and reload nginx")
+        print_page_summary("Domain → type → enable. Config is written for you.")
 
     async def handle(self, context: PageContext) -> PageResult | Page:
         domain = input("\nDomain (e.g. app.example.com): ").strip().lower()
@@ -781,7 +745,7 @@ class _CreateSiteWizardPage(Page):
 class _InteractiveSiteDetailPage(Page):
     def __init__(self, profile: SiteProfile) -> None:
         self._profile = profile
-        self._menu = _detail_menu(profile)
+        self._menu = _site_hub_menu(profile)
 
     @property
     def title(self) -> str:
@@ -789,32 +753,20 @@ class _InteractiveSiteDetailPage(Page):
 
     @property
     def subtitle(self) -> str:
-        return "site details and actions"
+        return "nginx"
 
     def render(self, context: PageContext) -> None:
         host = self._profile.virtual_host
-        ssl_label = _SSL_BADGES.get(self._profile.ssl_status, self._profile.ssl_status.value)
-        summary = format_nginx_status_badge(site_enabled=host.enabled)
-        if self._profile.recommendation:
-            summary = f"{summary}  ·  {self._profile.recommendation}"
-        print_page_summary(f"{summary}  ·  {ssl_label}")
         print_page_divider()
-        ports = ", ".join(str(port) for port in host.listen_ports) or "-"
-        ssl = host.cert_path or ("HTTPS" if host.ssl_enabled else "none")
-        print(
-            format_fields(
-                [
-                    ("Listen", ports),
-                    ("Config", host.config_path or "-"),
-                    ("SSL", ssl),
-                ],
-            ),
-        )
+        ports = ", ".join(str(port) for port in host.listen_ports) or "—"
+        ssl = _ssl_badge_short(self._profile)
+        state = "live" if host.enabled else "off"
+        print_page_summary(f"{state} · {ssl} · ports {ports}")
         if host.upstream:
-            print(format_field("Forwards", host.upstream))
-        if self._profile.certificate and self._profile.certificate.not_after:
-            print(format_field("Cert expires", self._profile.certificate.not_after.date().isoformat()))
-        _render_detail_menu(self._menu)
+            print(f"   {_c(DIM)}→ {host.upstream}{_reset()}")
+        print_page_divider()
+        for index, entry in enumerate(self._menu, start=1):
+            print_menu_item(index, entry.label, entry.hint)
 
     async def handle(self, context: PageContext) -> PageResult | Page:
         choice = prompt_choice(max_value=len(self._menu), allow_back=True, allow_exit=True)
@@ -824,9 +776,57 @@ class _InteractiveSiteDetailPage(Page):
             return PageResult.BACK
 
         entry = self._menu[choice - 1]
-        if entry.kind == "config":
+        if entry.kind == "configure":
             return _ConfigEditorPage(self._profile)
+        if entry.kind == "more":
+            return _SiteMorePage(self._profile)
 
+        result = await _run_site_action(
+            context,
+            self._profile,
+            entry.action_id or "",
+            _base_params(context, self._profile.virtual_host),
+        )
+        if result is None:
+            input("\nPress Enter to continue...")
+            return PageResult.STAY
+
+        print()
+        print_action_result(result)
+        input("\nPress Enter to continue...")
+        return PageResult.STAY
+
+
+class _SiteMorePage(Page):
+    _ITEMS = (
+        _MenuItem("action", "Test config", "test_config"),
+        _MenuItem("action", "View details", "view_details"),
+    )
+
+    def __init__(self, profile: SiteProfile) -> None:
+        self._profile = profile
+
+    @property
+    def title(self) -> str:
+        return _site_title(self._profile.virtual_host)
+
+    @property
+    def subtitle(self) -> str:
+        return "more"
+
+    def render(self, context: PageContext) -> None:
+        print_page_divider()
+        for index, entry in enumerate(self._ITEMS, start=1):
+            print_menu_item(index, entry.label)
+
+    async def handle(self, context: PageContext) -> PageResult | Page:
+        choice = prompt_choice(max_value=len(self._ITEMS), allow_back=True, allow_exit=True)
+        if choice is None:
+            return PageResult.EXIT
+        if choice == -1:
+            return PageResult.BACK
+
+        entry = self._ITEMS[choice - 1]
         result = await _run_site_action(
             context,
             self._profile,
@@ -845,10 +845,9 @@ class _InteractiveSiteDetailPage(Page):
 
 class _ConfigEditorPage(Page):
     _SECTIONS = (
-        ("redirects", "Redirects"),
-        ("backend", "Backend / proxy"),
-        ("static", "Static files"),
-        ("security", "Security headers"),
+        ("traffic", "Traffic", "proxy, paths, static files"),
+        ("domain", "Domain & redirects", "names, ports, HTTPS redirects"),
+        ("security", "Security", "header presets"),
     )
 
     def __init__(self, profile: SiteProfile) -> None:
@@ -860,13 +859,12 @@ class _ConfigEditorPage(Page):
 
     @property
     def subtitle(self) -> str:
-        return "edit configuration"
+        return "configure"
 
     def render(self, context: PageContext) -> None:
-        print_page_summary("Pick a section to edit — no text editor, guided changes only")
         print_page_divider()
-        for index, (_key, label) in enumerate(self._SECTIONS, start=1):
-            print(f"  {index:2}. {label}")
+        for index, (_key, label, hint) in enumerate(self._SECTIONS, start=1):
+            print_menu_item(index, label, hint)
 
     async def handle(self, context: PageContext) -> PageResult | Page:
         choice = prompt_choice(max_value=len(self._SECTIONS), allow_back=True, allow_exit=True)
@@ -876,13 +874,343 @@ class _ConfigEditorPage(Page):
             return PageResult.BACK
 
         section_key = self._SECTIONS[choice - 1][0]
-        if section_key == "redirects":
-            return _RedirectsSectionPage(self._profile)
+        if section_key == "traffic":
+            return _TrafficHubPage(self._profile)
+        if section_key == "domain":
+            return _DomainRoutingHubPage(self._profile)
+        return _SecuritySectionPage(self._profile)
+
+
+class _TrafficHubPage(Page):
+    _SECTIONS = (
+        ("backend", "Backend"),
+        ("locations", "Paths"),
+        ("static", "Static files"),
+    )
+
+    def __init__(self, profile: SiteProfile) -> None:
+        self._profile = profile
+
+    @property
+    def title(self) -> str:
+        return _site_title(self._profile.virtual_host)
+
+    @property
+    def subtitle(self) -> str:
+        return "traffic"
+
+    def render(self, context: PageContext) -> None:
+        print_page_divider()
+        for index, (_key, label) in enumerate(self._SECTIONS, start=1):
+            print_menu_item(index, label)
+
+    async def handle(self, context: PageContext) -> PageResult | Page:
+        choice = prompt_choice(max_value=len(self._SECTIONS), allow_back=True, allow_exit=True)
+        if choice is None:
+            return PageResult.EXIT
+        if choice == -1:
+            return PageResult.BACK
+
+        section_key = self._SECTIONS[choice - 1][0]
         if section_key == "backend":
             return _BackendSectionPage(self._profile)
-        if section_key == "static":
-            return _StaticSectionPage(self._profile)
-        return _SecuritySectionPage(self._profile)
+        if section_key == "locations":
+            return _LocationsSectionPage(self._profile)
+        return _StaticSectionPage(self._profile)
+
+
+class _DomainRoutingHubPage(Page):
+    _SECTIONS = (
+        ("domain_ports", "Domain & ports"),
+        ("redirects", "Redirects"),
+    )
+
+    def __init__(self, profile: SiteProfile) -> None:
+        self._profile = profile
+
+    @property
+    def title(self) -> str:
+        return _site_title(self._profile.virtual_host)
+
+    @property
+    def subtitle(self) -> str:
+        return "domain"
+
+    def render(self, context: PageContext) -> None:
+        print_page_divider()
+        for index, (_key, label) in enumerate(self._SECTIONS, start=1):
+            print_menu_item(index, label)
+
+    async def handle(self, context: PageContext) -> PageResult | Page:
+        choice = prompt_choice(max_value=len(self._SECTIONS), allow_back=True, allow_exit=True)
+        if choice is None:
+            return PageResult.EXIT
+        if choice == -1:
+            return PageResult.BACK
+
+        section_key = self._SECTIONS[choice - 1][0]
+        if section_key == "domain_ports":
+            return _DomainPortsSectionPage(self._profile)
+        return _RedirectsSectionPage(self._profile)
+
+
+class _DomainPortsSectionPage(Page):
+    def __init__(self, profile: SiteProfile) -> None:
+        self._profile = profile
+        self._sections: SiteConfigSections | None = None
+
+    @property
+    def title(self) -> str:
+        return _site_title(self._profile.virtual_host)
+
+    @property
+    def subtitle(self) -> str:
+        return "domain · ports"
+
+    async def on_enter(self, context: PageContext) -> None:
+        host = self._profile.virtual_host
+        domain = host.server_names[0] if host.server_names else ""
+        self._sections = await load_site_config_sections(host.config_path, domain)
+
+    def render(self, context: PageContext) -> None:
+        sections = self._sections
+        if sections is None:
+            return
+        names = ", ".join(sections.server_names) or "—"
+        listens = ", ".join(endpoint.display() for endpoint in sections.listen_endpoints) or "—"
+        bind = sections.http_listen_address or "*"
+        print_page_divider()
+        print_page_summary(f"names {names} · listen {listens} · 443 {_on_off(sections.listen_443_ssl)}")
+        print_menu_list(
+            [
+                (1, "Add name"),
+                (2, "Remove name"),
+                (3, "Toggle 443 SSL"),
+                (4, "HTTP port", str(sections.http_port)),
+                (5, "Bind IP", bind),
+                (6, "Clear IP bind"),
+            ],
+        )
+
+    async def handle(self, context: PageContext) -> PageResult | Page:
+        sections = self._sections
+        if sections is None:
+            return PageResult.STAY
+
+        choice = prompt_choice(max_value=6, allow_back=True, allow_exit=True)
+        if choice is None:
+            return PageResult.EXIT
+        if choice == -1:
+            return PageResult.BACK
+
+        params = _base_params(context, self._profile.virtual_host)
+        params["reload"] = True
+
+        if choice == 1:
+            value = input("\nDomain to add (e.g. www.example.com): ").strip().lower()
+            if not value:
+                print("Domain is required.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            if not _valid_domain(value):
+                print("Enter a valid domain name.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            params["add_server_name"] = value
+        elif choice == 2:
+            if len(sections.server_names) <= 1:
+                print("\nCannot remove the last server_name.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            print("\nCurrent names:")
+            for index, name in enumerate(sections.server_names, start=1):
+                print(f"   {index}. {name}")
+            pick = prompt_choice(max_value=len(sections.server_names), allow_back=False, allow_exit=False)
+            params["remove_server_name"] = sections.server_names[pick - 1]
+        elif choice == 3:
+            if not sections.listen_443_ssl:
+                has_cert = (
+                    self._profile.virtual_host.ssl_enabled
+                    or self._profile.certificate is not None
+                )
+                if not has_cert:
+                    print(
+                        "\nObtain HTTPS first — listen 443 ssl needs a certificate.",
+                        file=sys.stderr,
+                    )
+                    input("\nPress Enter to continue...")
+                    return PageResult.STAY
+            params["listen_443"] = not sections.listen_443_ssl
+        elif choice == 4:
+            raw = input(f"\nHTTP port [{sections.http_port}]: ").strip()
+            if not raw:
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            try:
+                port = int(raw)
+            except ValueError:
+                print("Enter a valid port number.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            if not 1 <= port <= 65535:
+                print("Port must be between 1 and 65535.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            params["http_port"] = port
+        elif choice == 5:
+            value = input("\nIPv4 address to bind (e.g. 10.0.0.1): ").strip()
+            if not value:
+                print("IP address is required.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            params["http_listen_address"] = value
+        else:
+            params["clear_http_listen_address"] = True
+
+        if await _run_hidden_action(context, self._profile, "apply_domain_port_settings", params):
+            host = self._profile.virtual_host
+            domain = host.server_names[0] if host.server_names else ""
+            self._sections = await load_site_config_sections(host.config_path, domain)
+        return PageResult.STAY
+
+
+class _LocationsSectionPage(Page):
+    def __init__(self, profile: SiteProfile) -> None:
+        self._profile = profile
+        self._sections: SiteConfigSections | None = None
+
+    @property
+    def title(self) -> str:
+        return _site_title(self._profile.virtual_host)
+
+    @property
+    def subtitle(self) -> str:
+        return "traffic · paths"
+
+    async def on_enter(self, context: PageContext) -> None:
+        host = self._profile.virtual_host
+        domain = host.server_names[0] if host.server_names else ""
+        self._sections = await load_site_config_sections(host.config_path, domain)
+
+    def render(self, context: PageContext) -> None:
+        sections = self._sections
+        if sections is None:
+            return
+        print_page_divider()
+        if sections.locations:
+            for location in sections.locations:
+                print(f"   {location.path:<10} {_c(DIM)}{location.summary()}{_reset()}")
+        else:
+            print_page_summary("No paths yet — add /api or /static")
+        print_menu_list([(1, "Add"), (2, "Edit"), (3, "Remove")])
+
+    async def handle(self, context: PageContext) -> PageResult | Page:
+        sections = self._sections
+        if sections is None:
+            return PageResult.STAY
+
+        choice = prompt_choice(max_value=3, allow_back=True, allow_exit=True)
+        if choice is None:
+            return PageResult.EXIT
+        if choice == -1:
+            return PageResult.BACK
+
+        params = _base_params(context, self._profile.virtual_host)
+        params["reload"] = True
+
+        if choice == 1:
+            path = input("\nLocation path (e.g. /api): ").strip()
+            if not path.startswith("/"):
+                print("Path must start with /.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            print("\nLocation type:")
+            print("   1. Reverse proxy (proxy_pass)")
+            print("   2. Static root")
+            print("   3. Static alias")
+            kind = prompt_choice(max_value=3, allow_back=False, allow_exit=False)
+            params["add_location_path"] = path
+            if kind == 1:
+                value = input("\nproxy_pass URL: ").strip()
+                if not value:
+                    print("URL is required.", file=sys.stderr)
+                    input("\nPress Enter to continue...")
+                    return PageResult.STAY
+                params["proxy_pass"] = value
+            elif kind == 2:
+                value = input("\nDocument root path: ").strip()
+                if not value:
+                    print("Path is required.", file=sys.stderr)
+                    input("\nPress Enter to continue...")
+                    return PageResult.STAY
+                params["document_root"] = value
+            else:
+                value = input("\nAlias path: ").strip()
+                if not value:
+                    print("Path is required.", file=sys.stderr)
+                    input("\nPress Enter to continue...")
+                    return PageResult.STAY
+                params["alias"] = value
+        elif choice == 2:
+            if not sections.locations:
+                print("\nNo locations to edit.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            print("\nPick location:")
+            for index, location in enumerate(sections.locations, start=1):
+                print(f"   {index}. {location.path} — {location.summary()}")
+            pick = prompt_choice(max_value=len(sections.locations), allow_back=False, allow_exit=False)
+            location = sections.locations[pick - 1]
+            params["update_location_path"] = location.path
+            print("\nUpdate:")
+            print("   1. Set proxy_pass")
+            print("   2. Set root")
+            print("   3. Set alias")
+            print("   4. Set try_files")
+            print("   5. Remove proxy_pass")
+            update_choice = prompt_choice(max_value=5, allow_back=False, allow_exit=False)
+            if update_choice == 1:
+                value = input("\nproxy_pass URL: ").strip()
+                if not value:
+                    input("\nPress Enter to continue...")
+                    return PageResult.STAY
+                params["proxy_pass"] = value
+            elif update_choice == 2:
+                value = input("\nDocument root path: ").strip()
+                if not value:
+                    input("\nPress Enter to continue...")
+                    return PageResult.STAY
+                params["document_root"] = value
+            elif update_choice == 3:
+                value = input("\nAlias path: ").strip()
+                if not value:
+                    input("\nPress Enter to continue...")
+                    return PageResult.STAY
+                params["alias"] = value
+            elif update_choice == 4:
+                value = input("\ntry_files (e.g. $uri $uri/ =404): ").strip()
+                if not value:
+                    input("\nPress Enter to continue...")
+                    return PageResult.STAY
+                params["try_files"] = value
+            else:
+                params["remove_proxy"] = True
+        else:
+            if not sections.locations:
+                print("\nNo locations to remove.", file=sys.stderr)
+                input("\nPress Enter to continue...")
+                return PageResult.STAY
+            print("\nPick location to remove:")
+            for index, location in enumerate(sections.locations, start=1):
+                print(f"   {index}. {location.path} — {location.summary()}")
+            pick = prompt_choice(max_value=len(sections.locations), allow_back=False, allow_exit=False)
+            params["remove_location_path"] = sections.locations[pick - 1].path
+
+        if await _run_hidden_action(context, self._profile, "apply_location_settings", params):
+            host = self._profile.virtual_host
+            domain = host.server_names[0] if host.server_names else ""
+            self._sections = await load_site_config_sections(host.config_path, domain)
+        return PageResult.STAY
 
 
 class _RedirectsSectionPage(Page):
@@ -896,7 +1224,7 @@ class _RedirectsSectionPage(Page):
 
     @property
     def subtitle(self) -> str:
-        return "redirects"
+        return "domain · redirects"
 
     async def on_enter(self, context: PageContext) -> None:
         host = self._profile.virtual_host
@@ -907,14 +1235,11 @@ class _RedirectsSectionPage(Page):
         sections = self._sections
         if sections is None:
             return
-        print_page_summary("Toggle redirects — changes are written to the nginx config file")
         print_page_divider()
-        print(format_field("HTTP → HTTPS", _on_off(sections.http_to_https)))
-        print(format_field("www → apex", _on_off(sections.www_to_apex)))
-        print_page_divider()
-        print(f"{_c(DIM)}Actions{_reset()}\n")
-        print("   1. Toggle HTTP → HTTPS")
-        print("   2. Toggle www → apex")
+        print_page_summary(
+            f"HTTP→HTTPS {_on_off(sections.http_to_https)} · www→apex {_on_off(sections.www_to_apex)}",
+        )
+        print_menu_list([(1, "Toggle HTTP→HTTPS"), (2, "Toggle www→apex")])
 
     async def handle(self, context: PageContext) -> PageResult | Page:
         sections = self._sections
@@ -952,7 +1277,7 @@ class _BackendSectionPage(Page):
 
     @property
     def subtitle(self) -> str:
-        return "backend / proxy"
+        return "traffic · backend"
 
     async def on_enter(self, context: PageContext) -> None:
         host = self._profile.virtual_host
@@ -963,13 +1288,9 @@ class _BackendSectionPage(Page):
         sections = self._sections
         if sections is None:
             return
-        print_page_summary("Set where nginx sends traffic")
         print_page_divider()
-        print(format_field("proxy_pass", sections.proxy_pass or "-"))
-        print_page_divider()
-        print(f"{_c(DIM)}Actions{_reset()}\n")
-        print("   1. Set proxy_pass URL")
-        print("   2. Remove proxy_pass")
+        print_page_summary(f"proxy_pass {sections.proxy_pass or '—'}")
+        print_menu_list([(1, "Set URL"), (2, "Remove")])
 
     async def handle(self, context: PageContext) -> PageResult | Page:
         sections = self._sections
@@ -1013,7 +1334,7 @@ class _StaticSectionPage(Page):
 
     @property
     def subtitle(self) -> str:
-        return "static files"
+        return "traffic · static"
 
     async def on_enter(self, context: PageContext) -> None:
         host = self._profile.virtual_host
@@ -1024,18 +1345,19 @@ class _StaticSectionPage(Page):
         sections = self._sections
         if sections is None:
             return
-        print_page_summary("Configure static file serving — root, index, try_files")
         print_page_divider()
-        print(format_field("root", sections.document_root or "-"))
-        print(format_field("index", sections.index_files or "-"))
-        print(format_field("try_files", sections.try_files or "-"))
-        print_page_divider()
-        print(f"{_c(DIM)}Actions{_reset()}\n")
-        print("   1. Set document root")
-        print("   2. Set index files")
-        print(f"   3. try_files — standard ({TRY_FILES_STANDARD})")
-        print(f"   4. try_files — SPA fallback ({TRY_FILES_SPA})")
-        print("   5. Remove try_files")
+        print_page_summary(
+            f"root {sections.document_root or '—'} · try_files {sections.try_files or '—'}",
+        )
+        print_menu_list(
+            [
+                (1, "Set root"),
+                (2, "Set index"),
+                (3, "try_files standard"),
+                (4, "try_files SPA"),
+                (5, "Remove try_files"),
+            ],
+        )
 
     async def handle(self, context: PageContext) -> PageResult | Page:
         sections = self._sections
@@ -1093,7 +1415,7 @@ class _SecuritySectionPage(Page):
 
     @property
     def subtitle(self) -> str:
-        return "security headers"
+        return "security"
 
     async def on_enter(self, context: PageContext) -> None:
         host = self._profile.virtual_host
@@ -1104,18 +1426,12 @@ class _SecuritySectionPage(Page):
         sections = self._sections
         if sections is None:
             return
-        print_page_summary("Apply a preset — InfraWatch manages add_header lines only")
+        current = _security_preset_label(sections.security_preset)
         print_page_divider()
-        print(format_field("Current preset", _security_preset_label(sections.security_preset)))
+        print_page_summary(f"preset {current}")
         if not self._profile.virtual_host.ssl_enabled:
-            print(
-                f"   {_c(YELLOW)}Strict preset needs HTTPS — obtain a certificate first{_reset()}",
-            )
-        print_page_divider()
-        print(f"{_c(DIM)}Presets{_reset()}\n")
-        print("   1. Basic  — X-Frame-Options, X-Content-Type-Options, Referrer-Policy")
-        print("   2. Strict — Basic + HSTS (1 year) + Permissions-Policy")
-        print("   3. None   — remove InfraWatch-managed security headers")
+            print(f"   {_c(YELLOW)}Strict needs HTTPS first{_reset()}")
+        print_menu_list([(1, "Basic"), (2, "Strict"), (3, "None")])
 
     async def handle(self, context: PageContext) -> PageResult | Page:
         sections = self._sections

@@ -15,6 +15,8 @@ from iw_agent.core.logger import logger
 from iw_agent.core._thread import read
 from iw_agent.modules.ngnix.schemas import (
     MANAGED_SECURITY_HEADER_NAMES,
+    ListenEndpoint,
+    LocationBlock,
     SecurityPreset,
     SiteConfigSections,
     SiteProfile,
@@ -339,9 +341,86 @@ _ADD_HEADER_LINE = re.compile(
     r'^\s*add_header\s+(?P<name>[^;\s]+)\s+"(?P<value>[^"]*)"(?:\s+always)?\s*;\s*$',
 )
 _LOCATION_ROOT_START = re.compile(r"^\s*location\s+/\s*\{")
+_LOCATION_PREFIX_START = re.compile(r"^\s*location\s+(?P<path>/[^\s{~*]*)\s*\{")
+_ALIAS_LINE = re.compile(r"^\s*alias\s+(?P<value>.+);\s*$")
 _INDEX_LINE = re.compile(r"^\s*index\s+(?P<value>.+);\s*$")
 _TRY_FILES_LINE = re.compile(r"^\s*try_files\s+(?P<value>.+);\s*$")
 _ROOT_LINE = re.compile(r"^\s*root\s+(?P<value>.+);\s*$")
+_LISTEN_LINE = re.compile(r"^\s*listen\s+(?P<value>.+);\s*$")
+
+
+def parse_listen_directive(value: str) -> ListenEndpoint | None:
+    cleaned = value.strip().strip(";")
+    tokens = cleaned.split()
+    if not tokens:
+        return None
+
+    ssl = "ssl" in tokens
+    host_token = tokens[0]
+
+    if host_token.startswith("["):
+        _, _, port_str = host_token.partition("]:")
+        if not port_str:
+            return None
+        try:
+            port = int(port_str)
+        except ValueError:
+            return None
+        inner = host_token[1 : host_token.index("]")]
+        address = "::" if inner == "::" else inner
+        return ListenEndpoint(port=port, ssl=ssl, address=address)
+
+    if ":" in host_token:
+        address, port_str = host_token.rsplit(":", 1)
+        try:
+            port = int(port_str)
+        except ValueError:
+            return None
+        return ListenEndpoint(port=port, ssl=ssl, address=address or None)
+
+    try:
+        port = int(host_token)
+    except ValueError:
+        return None
+    return ListenEndpoint(port=port, ssl=ssl, address=None)
+
+
+def _listen_endpoints_from_block(block_lines: list[str]) -> list[ListenEndpoint]:
+    endpoints: list[ListenEndpoint] = []
+    for line in block_lines:
+        if re.match(r"^\s*location\s+", line):
+            break
+        match = _LISTEN_LINE.match(line)
+        if not match:
+            continue
+        endpoint = parse_listen_directive(match.group("value"))
+        if endpoint is not None:
+            endpoints.append(endpoint)
+    return endpoints
+
+
+def _domain_port_summary(
+    endpoints: list[ListenEndpoint],
+) -> tuple[int, Optional[str], bool]:
+    http_port = 80
+    http_listen_address: str | None = None
+    listen_443_ssl = False
+
+    for endpoint in endpoints:
+        if endpoint.ssl and endpoint.port == 443:
+            listen_443_ssl = True
+
+    for endpoint in endpoints:
+        if endpoint.ssl:
+            continue
+        if endpoint.address == "::":
+            http_port = endpoint.port
+            continue
+        http_port = endpoint.port
+        http_listen_address = endpoint.address
+        break
+
+    return http_port, http_listen_address, listen_443_ssl
 
 
 def _extract_server_blocks(content: str) -> list[list[str]]:
@@ -414,6 +493,56 @@ def _main_server_block_lines(content: str, primary_domain: str) -> list[str] | N
         if primary_domain in names:
             return block_lines
     return None
+
+
+def _location_block_from_lines(path: str, block_lines: list[str]) -> LocationBlock:
+    proxy_pass: str | None = None
+    root: str | None = None
+    alias: str | None = None
+    try_files: str | None = None
+
+    for line in block_lines:
+        for directive_name, directive_value in _directives_from_text(line):
+            if directive_name == "proxy_pass" and proxy_pass is None:
+                proxy_pass = directive_value.strip().strip('"')
+            elif directive_name == "root" and root is None:
+                root = directive_value.strip().strip('"')
+            elif directive_name == "try_files" and try_files is None:
+                try_files = directive_value.strip().strip('"')
+        alias_match = _ALIAS_LINE.match(line)
+        if alias_match and alias is None:
+            alias = alias_match.group("value").strip().strip('"')
+
+    return LocationBlock(
+        path=path,
+        proxy_pass=proxy_pass,
+        root=root,
+        alias=alias,
+        try_files=try_files,
+    )
+
+
+def _prefix_locations_from_block(block_lines: list[str]) -> list[LocationBlock]:
+    locations: list[LocationBlock] = []
+    index = 1
+    while index < len(block_lines):
+        match = _LOCATION_PREFIX_START.match(block_lines[index])
+        if not match:
+            index += 1
+            continue
+
+        path = match.group("path")
+        depth = 0
+        loc_lines: list[str] = []
+        while index < len(block_lines):
+            line = block_lines[index]
+            loc_lines.append(line)
+            depth += line.count("{") - line.count("}")
+            index += 1
+            if depth <= 0:
+                break
+        locations.append(_location_block_from_lines(path, loc_lines))
+    return locations
 
 
 def _find_location_root_in_block_lines(block_lines: list[str]) -> tuple[int, int] | None:
@@ -498,11 +627,21 @@ def _load_site_config_sections_sync(config_path: str, primary_domain: str) -> Si
     index_files: str | None = None
     try_files: str | None = None
     security_preset = SecurityPreset.NONE
+    server_names: list[str] = []
+    listen_endpoints: list[ListenEndpoint] = []
+    http_port = 80
+    http_listen_address: str | None = None
+    listen_443_ssl = False
+    locations: list[LocationBlock] = []
 
     main_block = _main_server_block_lines(content, primary_domain)
     if main_block is not None:
         security_preset = _detect_security_preset(_headers_in_block(main_block))
         document_root, index_files, try_files = _static_values_from_server_block(main_block)
+        server_names = _server_names_in_block(main_block)
+        listen_endpoints = _listen_endpoints_from_block(main_block)
+        http_port, http_listen_address, listen_443_ssl = _domain_port_summary(listen_endpoints)
+        locations = _prefix_locations_from_block(main_block)
 
     for block_lines in _extract_server_blocks(content):
         if _is_http_redirect_block(block_lines, primary_domain):
@@ -523,6 +662,12 @@ def _load_site_config_sections_sync(config_path: str, primary_domain: str) -> Si
     return SiteConfigSections(
         config_path=config_path,
         primary_domain=primary_domain,
+        server_names=server_names or ([primary_domain] if primary_domain else []),
+        listen_endpoints=listen_endpoints,
+        http_port=http_port,
+        http_listen_address=http_listen_address,
+        listen_443_ssl=listen_443_ssl,
+        locations=locations,
         http_to_https=http_redirect,
         www_to_apex=www_redirect,
         proxy_pass=proxy_pass,
