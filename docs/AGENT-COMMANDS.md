@@ -81,6 +81,51 @@ Listening ports and outbound connections.
 
 **Flags:** `--timeout SEC` · `--binary PATH` · `nginx-config --show-stdout`
 
+**Interactive:**
+
+| Entry | Description |
+|-------|-------------|
+| `iw nginx -i` | Browse sites, pick actions (read/write with confirm + audit log) |
+| `iw` → nginx → **2** | Same site manager from the main menu |
+| `-i` → **Create new site** | Wizard: domain, static or proxy, enable + reload |
+| `--dry-run` | Preview write actions without applying them |
+| `--staging` | Let's Encrypt test certificates (also prompted in `-i`) |
+
+Reload, enable, and disable run through the module executor (`sudo` required). `Test nginx config` runs `nginx -t`.
+
+**SSL wizard (ngnix executor):**
+
+| Situation | Action in menu |
+|-----------|----------------|
+| NO SSL | Obtain HTTPS certificate (precheck → certbot → attach nginx → HTTP redirect → reload) |
+| EXPIRING / EXPIRED | Renew certificate |
+| MISMATCH | Attach certificate to nginx |
+
+Action params: `domain`, `email` (obtain), `method` (`auto`/`nginx`/`webroot`), `staging`, `webroot`.
+
+**Config editor (`-i` → site → Edit configuration):**
+
+| Section | What you can change |
+|---------|---------------------|
+| Redirects | Toggle HTTP→HTTPS and www→apex redirect blocks |
+| Backend / proxy | Set `proxy_pass` or remove it |
+| Static files | Set `root`, `index`, `try_files` (standard or SPA preset), or remove `try_files` |
+| Security headers | Presets: **Basic** (frame/options/referrer), **Strict** (+ HSTS, needs HTTPS), **None** (remove managed headers) |
+
+Changes are written to the site config file, then nginx is tested and reloaded (with confirm prompts).
+
+**New site wizard (`-i` → Create new site):**
+
+| Step | What you choose |
+|------|-----------------|
+| Domain | e.g. `app.example.com` |
+| Type | Static files or reverse proxy |
+| Static | Document root, try_files (standard or SPA) |
+| Proxy | Backend URL (`proxy_pass`) |
+| Enable | Symlink into `sites-enabled` and reload nginx |
+
+Config is written to `sites-available/<domain>`. Use **Obtain HTTPS certificate** on the site afterward if needed.
+
 ---
 
 ## SSL

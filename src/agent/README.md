@@ -2,7 +2,7 @@
 
 Read-only collectors for server inspection: processes, network, Docker, nginx, SSL certificates, cron jobs, and device metrics.
 
-This package is the **collector layer** of the InfraWatch agent. It gathers host data and exposes it through a CLI (`iw`) and Python APIs. Transport to core (WebSocket daemon, executors) is not included yet.
+This package is the InfraWatch **agent layer**. Collectors are read-only; module **executors** handle writes. The CLI (`iw`) calls executors via `ActionService` in `core/`.
 
 ## Requirements
 
@@ -104,8 +104,8 @@ src/iw_agent/
     ├── network/         # listening ports + outbound connections
     ├── processes/       # process list + cgroup attribution
     ├── docker/          # Docker Engine API (unix socket)
-    ├── ngnix/           # nginx -T virtual host parser
-    ├── ssl/             # X.509 certificates (certbot + nginx paths)
+    ├── ngnix/           # schemas, collector, executor, commands
+    ├── ssl/             # schemas, collector, executor, commands
     └── cron/            # crontab jobs + execution history
 ```
 

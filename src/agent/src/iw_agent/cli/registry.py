@@ -18,7 +18,7 @@ def _wrap_command_handler(
     handler: Callable[..., Awaitable[None]],
 ) -> Callable[..., Awaitable[None]]:
     async def wrapped(args) -> None:
-        if not getattr(args, "json", False):
+        if not getattr(args, "json", False) and not getattr(args, "interactive", False):
             prepare_command_view(plain=getattr(args, "plain", False))
         await handler(args)
 

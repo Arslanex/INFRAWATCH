@@ -131,3 +131,16 @@ class CronCrontabUnreadableError(CronError):
 
 class CronExecutionLogUnreadableError(CronError):
     code = "CRON_EXECUTION_LOG_UNREADABLE"
+
+
+class ExecutorError(AgentError):
+    service = "executor"
+    code = "EXECUTOR_ERROR"
+
+
+class ActionDeniedError(ExecutorError):
+    code = "ACTION_DENIED"
+
+
+class ActionCancelledError(ExecutorError):
+    code = "ACTION_CANCELLED"

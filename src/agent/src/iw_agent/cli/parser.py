@@ -33,6 +33,25 @@ def add_limit_flag(
     )
 
 
+def add_interactive_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="interactive browser with actions",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview write actions without applying them",
+    )
+    parser.add_argument(
+        "--staging",
+        action="store_true",
+        help="use Let's Encrypt staging environment",
+    )
+
+
 def add_timeout_flag(
     parser: argparse.ArgumentParser,
     *,

@@ -12,7 +12,18 @@ from iw_agent.core.exceptions import (
     NginxTimeoutError,
 )
 from iw_agent.core.logger import logger
-from iw_agent.modules.ngnix.schemas import VirtualHost
+from iw_agent.core._thread import read
+from iw_agent.modules.ngnix.schemas import (
+    MANAGED_SECURITY_HEADER_NAMES,
+    SecurityPreset,
+    SiteConfigSections,
+    SiteProfile,
+    SslStatus,
+    VirtualHost,
+    security_headers_for_preset,
+)
+from iw_agent.modules.ssl.collector import DEFAULT_CERTBOT_LIVE_DIR, collect_certificates
+from iw_agent.modules.ssl.schemas import Certificate
 
 CONFIG_FILE_MARKER = re.compile(r"^#\s*configuration file (?P<path>.+):$")
 SERVER_BLOCK_START = re.compile(r"^\s*server\s*\{")
@@ -318,6 +329,365 @@ def _listen_port_number(listen_value: str) -> int | None:
         return int(candidate)
     except ValueError:
         return None
+
+
+EXPIRING_DAYS = 30
+_REDIRECT_RETURN = re.compile(r"^\s*return\s+301\s+")
+_SERVER_NAME_LINE = re.compile(r"^\s*server_name\s+(?P<names>.+);")
+_LISTEN_443 = re.compile(r"^\s*listen\s+.*443")
+_ADD_HEADER_LINE = re.compile(
+    r'^\s*add_header\s+(?P<name>[^;\s]+)\s+"(?P<value>[^"]*)"(?:\s+always)?\s*;\s*$',
+)
+_LOCATION_ROOT_START = re.compile(r"^\s*location\s+/\s*\{")
+_INDEX_LINE = re.compile(r"^\s*index\s+(?P<value>.+);\s*$")
+_TRY_FILES_LINE = re.compile(r"^\s*try_files\s+(?P<value>.+);\s*$")
+_ROOT_LINE = re.compile(r"^\s*root\s+(?P<value>.+);\s*$")
+
+
+def _extract_server_blocks(content: str) -> list[list[str]]:
+    lines = content.splitlines()
+    blocks: list[list[str]] = []
+    index = 0
+    while index < len(lines):
+        if SERVER_BLOCK_START.match(lines[index]):
+            start = index
+            depth = 0
+            while index < len(lines):
+                depth += lines[index].count("{") - lines[index].count("}")
+                index += 1
+                if depth <= 0:
+                    blocks.append(lines[start:index])
+                    break
+            continue
+        index += 1
+    return blocks
+
+
+def _server_names_in_block(block_lines: list[str]) -> list[str]:
+    names: list[str] = []
+    for line in block_lines:
+        match = _SERVER_NAME_LINE.match(line)
+        if match:
+            names.extend(part for part in match.group("names").split() if part != "_")
+    return names
+
+
+def _is_http_redirect_block(block_lines: list[str], domain: str) -> bool:
+    names = _server_names_in_block(block_lines)
+    if domain not in names:
+        return False
+    block_text = "\n".join(block_lines)
+    if "www." in domain:
+        return False
+    if _LISTEN_443.search(block_text):
+        return False
+    if "proxy_pass" in block_text or re.search(r"^\s*root\s+", block_text, re.MULTILINE):
+        return False
+    return bool(_REDIRECT_RETURN.search(block_text))
+
+
+def _is_www_redirect_block(block_lines: list[str], domain: str) -> bool:
+    www_name = f"www.{domain}"
+    names = _server_names_in_block(block_lines)
+    if www_name not in names:
+        return False
+    block_text = "\n".join(block_lines)
+    return bool(_REDIRECT_RETURN.search(block_text)) and domain in block_text
+
+
+def _headers_in_block(block_lines: list[str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for line in block_lines:
+        match = _ADD_HEADER_LINE.match(line)
+        if match and match.group("name") in MANAGED_SECURITY_HEADER_NAMES:
+            headers[match.group("name")] = match.group("value")
+    return headers
+
+
+def _main_server_block_lines(content: str, primary_domain: str) -> list[str] | None:
+    for block_lines in _extract_server_blocks(content):
+        if _is_http_redirect_block(block_lines, primary_domain):
+            continue
+        if _is_www_redirect_block(block_lines, primary_domain):
+            continue
+        names = _server_names_in_block(block_lines)
+        if primary_domain in names:
+            return block_lines
+    return None
+
+
+def _find_location_root_in_block_lines(block_lines: list[str]) -> tuple[int, int] | None:
+    index = 0
+    while index < len(block_lines):
+        if _LOCATION_ROOT_START.match(block_lines[index]):
+            start = index
+            depth = 0
+            while index < len(block_lines):
+                depth += block_lines[index].count("{") - block_lines[index].count("}")
+                index += 1
+                if depth <= 0:
+                    return start, index - 1
+            return None
+        index += 1
+    return None
+
+
+def _static_values_from_server_block(
+    block_lines: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    document_root: str | None = None
+    index_files: str | None = None
+    try_files: str | None = None
+
+    location = _find_location_root_in_block_lines(block_lines)
+    static_lines = block_lines
+    if location is not None:
+        loc_start, loc_end = location
+        loc_lines = block_lines[loc_start : loc_end + 1]
+        if "proxy_pass" not in "\n".join(loc_lines):
+            static_lines = loc_lines
+
+    for line in static_lines:
+        index_match = _INDEX_LINE.match(line)
+        if index_match and index_files is None:
+            index_files = index_match.group("value").strip().strip('"')
+        try_match = _TRY_FILES_LINE.match(line)
+        if try_match and try_files is None:
+            try_files = try_match.group("value").strip().strip('"')
+
+    if index_files is None or try_files is None:
+        for line in block_lines:
+            if index_files is None:
+                index_match = _INDEX_LINE.match(line)
+                if index_match:
+                    index_files = index_match.group("value").strip().strip('"')
+            if try_files is None:
+                try_match = _TRY_FILES_LINE.match(line)
+                if try_match:
+                    try_files = try_match.group("value").strip().strip('"')
+
+    for line in block_lines:
+        root_match = _ROOT_LINE.match(line)
+        if root_match:
+            document_root = root_match.group("value").strip().strip('"')
+            break
+
+    return document_root, index_files, try_files
+
+
+def _detect_security_preset(headers: dict[str, str]) -> SecurityPreset:
+    for preset in (SecurityPreset.STRICT, SecurityPreset.BASIC):
+        expected = {
+            name: value for name, value in security_headers_for_preset(preset)
+        }
+        if all(headers.get(name) == value for name, value in expected.items()):
+            return preset
+    return SecurityPreset.NONE
+
+
+def _load_site_config_sections_sync(config_path: str, primary_domain: str) -> SiteConfigSections:
+    path = Path(config_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"nginx config not found: {config_path}")
+
+    content = path.read_text(encoding="utf-8", errors="replace")
+    http_redirect = False
+    www_redirect = False
+    proxy_pass: str | None = None
+    document_root: str | None = None
+    index_files: str | None = None
+    try_files: str | None = None
+    security_preset = SecurityPreset.NONE
+
+    main_block = _main_server_block_lines(content, primary_domain)
+    if main_block is not None:
+        security_preset = _detect_security_preset(_headers_in_block(main_block))
+        document_root, index_files, try_files = _static_values_from_server_block(main_block)
+
+    for block_lines in _extract_server_blocks(content):
+        if _is_http_redirect_block(block_lines, primary_domain):
+            http_redirect = True
+            continue
+        if _is_www_redirect_block(block_lines, primary_domain):
+            www_redirect = True
+            continue
+
+        names = _server_names_in_block(block_lines)
+        if primary_domain not in names:
+            continue
+
+        for directive_name, directive_value in _directives_from_text("\n".join(block_lines)):
+            if directive_name == "proxy_pass" and proxy_pass is None:
+                proxy_pass = directive_value.strip('"').strip()
+
+    return SiteConfigSections(
+        config_path=config_path,
+        primary_domain=primary_domain,
+        http_to_https=http_redirect,
+        www_to_apex=www_redirect,
+        proxy_pass=proxy_pass,
+        document_root=document_root,
+        index_files=index_files,
+        try_files=try_files,
+        security_preset=security_preset,
+    )
+
+
+async def load_site_config_sections(config_path: str, primary_domain: str) -> SiteConfigSections:
+    return await read(_load_site_config_sections_sync, config_path, primary_domain)
+
+
+async def precheck_certificate_domain(domain: str) -> tuple[list[str], list[str]]:
+    import socket
+
+    from iw_agent.modules.network.collector import collect_listening_ports
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    try:
+        resolved = socket.gethostbyname(domain)
+    except socket.OSError:
+        errors.append(f"DNS: {domain} does not resolve")
+        resolved = None
+
+    if resolved is not None:
+        local_addresses = _local_ip_addresses()
+        if local_addresses and resolved not in local_addresses:
+            warnings.append(
+                f"DNS: {domain} points to {resolved}, not this host ({', '.join(sorted(local_addresses))})",
+            )
+
+    ports = await collect_listening_ports()
+    if not any(port.port_number == 80 for port in ports):
+        warnings.append("Port 80 is not listening — HTTP-01 challenge may fail")
+
+    return errors, warnings
+
+
+def _local_ip_addresses() -> set[str]:
+    import socket
+
+    addresses: set[str] = {"127.0.0.1"}
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addresses.add(info[4][0])
+    except OSError:
+        pass
+    try:
+        import psutil
+
+        for addresses_list in psutil.net_if_addrs().values():
+            for entry in addresses_list:
+                if entry.family == socket.AF_INET and entry.address:
+                    addresses.add(entry.address)
+    except (ImportError, OSError):
+        pass
+    return addresses
+
+
+async def collect_site_profiles(
+    *,
+    nginx_binary: str = DEFAULT_NGINX_BINARY,
+    nginx_timeout: float = DEFAULT_NGINX_TIMEOUT_SECONDS,
+    certbot_live_dir: str = DEFAULT_CERTBOT_LIVE_DIR,
+) -> list[SiteProfile]:
+    virtual_hosts = await collect_virtual_hosts(
+        nginx_binary=nginx_binary,
+        timeout=nginx_timeout,
+    )
+    dump_result = await fetch_nginx_dump(nginx_binary=nginx_binary, timeout=nginx_timeout)
+    nginx_cert_paths = (
+        certificate_paths_from_dump(dump_result.stdout)
+        if dump_result is not None and dump_result.ok
+        else []
+    )
+    certificates = await collect_certificates(
+        certbot_live_dir=certbot_live_dir,
+        nginx_cert_paths=nginx_cert_paths,
+    )
+    return [
+        _build_site_profile(virtual_host, certificates)
+        for virtual_host in virtual_hosts
+        if virtual_host.parse_ok
+    ]
+
+
+def _build_site_profile(
+    virtual_host: VirtualHost,
+    certificates: list[Certificate],
+) -> SiteProfile:
+    certificate = _match_certificate(virtual_host, certificates)
+    ssl_status = _resolve_ssl_status(virtual_host, certificate)
+    return SiteProfile(
+        virtual_host=virtual_host,
+        certificate=certificate,
+        ssl_status=ssl_status,
+        recommendation=_recommendation_for(ssl_status),
+    )
+
+
+def _match_certificate(
+    virtual_host: VirtualHost,
+    certificates: list[Certificate],
+) -> Certificate | None:
+    if virtual_host.cert_path:
+        cert_realpath = os.path.realpath(virtual_host.cert_path)
+        for certificate in certificates:
+            if os.path.realpath(certificate.cert_path) == cert_realpath:
+                return certificate
+
+    for name in virtual_host.server_names:
+        for certificate in certificates:
+            if certificate.domain == name:
+                return certificate
+            live_guess = f"/etc/letsencrypt/live/{name}/fullchain.pem"
+            if os.path.realpath(certificate.cert_path) == os.path.realpath(live_guess):
+                return certificate
+    return None
+
+
+def _resolve_ssl_status(
+    virtual_host: VirtualHost,
+    certificate: Certificate | None,
+) -> SslStatus:
+    if not virtual_host.ssl_enabled and certificate is None:
+        return SslStatus.NO_SSL
+    if virtual_host.ssl_enabled and certificate is None:
+        return SslStatus.SSL_MISMATCH
+    if certificate is None:
+        return SslStatus.NO_SSL
+    if virtual_host.server_names and certificate.domain not in virtual_host.server_names:
+        return SslStatus.SSL_MISMATCH
+    if certificate.not_after is None:
+        return SslStatus.SSL_OK
+
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    expiry = (
+        certificate.not_after
+        if certificate.not_after.tzinfo
+        else certificate.not_after.replace(tzinfo=timezone.utc)
+    )
+    days = (expiry - now).days
+    if days < 0:
+        return SslStatus.SSL_EXPIRED
+    if days <= EXPIRING_DAYS:
+        return SslStatus.SSL_EXPIRING
+    return SslStatus.SSL_OK
+
+
+def _recommendation_for(status: SslStatus) -> str | None:
+    if status == SslStatus.NO_SSL:
+        return "Obtain HTTPS certificate"
+    if status == SslStatus.SSL_EXPIRING:
+        return "Renew certificate soon"
+    if status == SslStatus.SSL_EXPIRED:
+        return "Renew certificate immediately"
+    if status == SslStatus.SSL_MISMATCH:
+        return "Fix certificate mapping in nginx config"
+    return None
 
 
 if __name__ == "__main__":

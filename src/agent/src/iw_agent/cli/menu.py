@@ -29,7 +29,28 @@ async def _interactive_menu() -> None:
             return
 
         selected = specs[choice - 1]
-        await selected.handler(_default_args())
+        args = _default_args()
+        if selected.name == "nginx":
+            args = _nginx_menu_args(args)
+            if args is None:
+                continue
+        await selected.handler(args)
+
+
+def _nginx_menu_args(args: argparse.Namespace) -> argparse.Namespace | None:
+    print("\nnginx:")
+    print("  1. view sites (read-only)")
+    print("  2. manage sites (certbot, enable, reload)")
+    while True:
+        raw = input("\n> ").strip()
+        if raw in {"q", "quit", "exit", "0"}:
+            return None
+        if raw in {"", "1"}:
+            return args
+        if raw == "2":
+            args.interactive = True
+            return args
+        print("Enter 1, 2, or q.", file=sys.stderr)
 
 
 def _read_choice(max_value: int) -> int:
@@ -50,9 +71,13 @@ def _read_choice(max_value: int) -> int:
 def _default_args() -> argparse.Namespace:
     return argparse.Namespace(
         json=False,
+        plain=False,
+        interactive=False,
+        dry_run=False,
+        staging=False,
         limit=10,
         outbound_limit=20,
-        timeout=5.0,
+        timeout=30.0,
         socket_path="/var/run/docker.sock",
         nginx_binary="nginx",
         certbot_live_dir="/etc/letsencrypt/live",
