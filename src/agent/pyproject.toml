@@ -1,0 +1,25 @@
+[project]
+name = "iw-agent"
+version = "0.1.0"
+description = "InfraWatch server agent collectors"
+requires-python = ">=3.9"
+dependencies = [
+    "psutil",
+    "pydantic",
+    "httpx",
+    "python-crontab",
+    "cryptography",
+]
+
+[project.scripts]
+iw = "iw_agent.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

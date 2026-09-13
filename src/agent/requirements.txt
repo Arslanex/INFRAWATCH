@@ -1,0 +1,5 @@
+psutil
+pydantic
+httpx
+python-crontab
+cryptography
