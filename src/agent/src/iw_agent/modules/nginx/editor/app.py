@@ -25,11 +25,7 @@ from iw_agent.cli.tui.widgets import (
 )
 from iw_agent.modules.nginx.confparse import Block, Directive
 from iw_agent.modules.nginx.editor import view
-from iw_agent.modules.nginx.editor.catalog import (
-    DOCUMENT_CONTEXT,
-    options_for,
-    render_template,
-)
+from iw_agent.modules.nginx.editor.catalog import options_for_insert, render_template
 from iw_agent.modules.nginx.editor.document import EditBuffer, EditRejected, node_at
 from iw_agent.modules.nginx.editor import panel
 from iw_agent.modules.nginx.editor.forms import form_for
@@ -63,6 +59,7 @@ class EditorSession:
     title: str
     read_only: bool = False
     dry_run: bool = False
+    site_enabled: bool = True
     folded: set = field(default_factory=set)
     cursor: int = 0
     top: int = 0
@@ -115,6 +112,7 @@ class EditorSession:
             status=self.status,
             read_only=self.read_only,
             dry_run=self.dry_run,
+            site_enabled=self.site_enabled,
             search_label=self.search_label,
             dirty_count=self.buffer.changed_lines(),
             modal=self._modal_view(),
@@ -169,6 +167,8 @@ class EditorSession:
             self._save()
         elif event == "x":
             self._open_actions()
+        elif event == "o":
+            self._toggle_site()
         elif event == "/":
             self._start_search()
         elif event == "n":
@@ -309,11 +309,11 @@ class EditorSession:
         self._open_picker(parent, row.path[-1] + 1, parent_path)
 
     def _open_picker(self, parent, index: int, parent_path) -> None:
-        context = DOCUMENT_CONTEXT if parent is self.document else getattr(parent, "name", "")
-        options = options_for(context)
+        options = options_for_insert(parent, index)
+        context = "file" if parent is self.document else getattr(parent, "name", "") or "block"
         picker = Picker(
             [PickerItem(option.label, option.hint, option) for option in options],
-            title=f"add to {context or 'file'}",
+            title=f"add to {context}",
         )
 
         def commit(item) -> None:
@@ -444,8 +444,21 @@ class EditorSession:
 
     # -- actions panel -----------------------------------------------------
 
+    def _toggle_site(self) -> None:
+        if self.read_only and not self.dry_run:
+            self.status = "read-only — rerun with sudo"
+            return
+        action_id = "disable_site" if self.site_enabled else "enable_site"
+        action = panel.action_for(action_id)
+        if action is None:
+            return
+        if action.destructive:
+            self._confirm_then_run(action)
+            return
+        self.pending_action = (action, {})
+
     def _open_actions(self) -> None:
-        actions = panel.available(dirty=self.buffer.dirty)
+        actions = panel.available(dirty=self.buffer.dirty, site_enabled=self.site_enabled)
         picker = Picker(
             [PickerItem(a.label, a.hint, a) for a in actions],
             title="actions",
@@ -564,6 +577,7 @@ def load_session(
     title: str = "",
     read_only: bool = False,
     dry_run: bool = False,
+    site_enabled: bool = True,
     action_params: dict | None = None,
 ) -> EditorSession:
     text = Path(config_path).read_text(encoding="utf-8", errors="replace")
@@ -572,6 +586,7 @@ def load_session(
         title=title or Path(config_path).name,
         read_only=read_only,
         dry_run=dry_run,
+        site_enabled=site_enabled,
         action_params=action_params or {},
     )
 
@@ -606,6 +621,10 @@ async def _perform_action(session: EditorSession) -> None:
         dry_run=session.dry_run,
     )
     session.status = result.message.replace("\n", " · ")
+    if result.ok and action.action_id == "enable_site":
+        session.site_enabled = True
+    elif result.ok and action.action_id == "disable_site":
+        session.site_enabled = False
     if result.ok and action.action_id in {"secure_site", "attach_ssl"}:
         # certbot rewrites the file underneath us
         session.reload_from_disk()

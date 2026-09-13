@@ -63,8 +63,10 @@ def _text_of(node: Node, index: int) -> str:
 
 def _add_label(parent: Node) -> str:
     if isinstance(parent, Document):
-        return "+ add server block"
+        return "+ add comment or spacing"
     name = getattr(parent, "name", "") or "block"
+    if name == "server":
+        return "+ add location or directive"
     if name == "location":
         return "+ add directive"
     return "+ add directive"

@@ -155,13 +155,14 @@ def test_a_raw_line_without_a_semicolon_is_refused(session):
 
 # --- adding ---------------------------------------------------------------
 
-def test_add_slot_opens_the_picker_for_that_context(session):
-    goto(session, "+ add server block")
+def test_file_level_add_slot_offers_spacing_not_new_servers(session):
+    goto(session, "+ add comment or spacing")
     session.handle(Key.ENTER)
 
     assert isinstance(session.modal.widget, Picker)
     labels = [item.label for item in session.modal.widget.items]
-    assert any("server block" in label for label in labels)
+    assert "comment" in labels
+    assert not any("server block" in label for label in labels)
 
 
 def test_picker_inside_a_location_offers_location_things(session):
@@ -176,9 +177,17 @@ def test_picker_inside_a_location_offers_location_things(session):
     assert "alias" in labels
 
 
+def _goto_server_add_slot(session):
+    for index, row in enumerate(session.rows):
+        if row.text.strip() == "+ add location or directive" and row.depth == 1:
+            session.cursor = index
+            return
+    raise AssertionError("server add slot not found")
+
+
 def test_adding_a_directive_inserts_it_with_the_right_indent(session):
-    goto(session, "listen 80;")
-    session.handle("a")
+    _goto_server_add_slot(session)
+    session.handle(Key.ENTER)
     type_text(session, "client_max")
     session.handle(Key.ENTER)
 
@@ -186,20 +195,19 @@ def test_adding_a_directive_inserts_it_with_the_right_indent(session):
     assert line == "    client_max_body_size 20m;"
 
 
-def test_adding_a_whole_block_from_a_template(session):
-    goto(session, "+ add server block")
+def test_adding_a_location_from_the_server_menu(session):
+    goto(session, "+ add location or directive")
     session.handle(Key.ENTER)
-    type_text(session, "redirect")
+    type_text(session, "static")
     session.handle(Key.ENTER)
 
-    assert "return 301 https://$host$request_uri;" in session.buffer.text
-    blocks = [n for n in session.document.walk() if isinstance(n, Block) and n.name == "server"]
-    assert len(blocks) == 2
+    assert "try_files $uri $uri/ =404;" in session.buffer.text
+    assert session.buffer.text.count("location /") >= 2
 
 
 def test_the_cursor_lands_on_what_was_just_added(session):
-    goto(session, "listen 80;")
-    session.handle("a")
+    _goto_server_add_slot(session)
+    session.handle(Key.ENTER)
     type_text(session, "client_max")
     session.handle(Key.ENTER)
 
@@ -208,8 +216,8 @@ def test_the_cursor_lands_on_what_was_just_added(session):
 
 def test_security_header_preset_is_available_as_a_template(session):
     """What the deleted security page used to do, as an insert you can see."""
-    goto(session, "listen 80;")
-    session.handle("a")
+    _goto_server_add_slot(session)
+    session.handle(Key.ENTER)
     type_text(session, "security headers — basic")
     session.handle(Key.ENTER)
 
@@ -314,15 +322,16 @@ def test_header_shows_the_unsaved_count(session):
     assert "unsaved" in screen.snapshot()[0]
 
 
-def test_picker_is_drawn_in_the_side_panel(session):
-    goto(session, "+ add server block")
+def test_picker_is_drawn_inline_in_the_config_pane(session):
+    _goto_server_add_slot(session)
     session.handle(Key.ENTER)
     screen = Screen(lambda _: None, width=98, height=18)
     view.render(screen, session.frame(18))
     body = "\n".join(screen.snapshot())
 
-    assert "add to file" in body
     assert "filter:" in body
+    assert "location" in body.lower()
+    assert "What" in body
 
 
 def test_save_is_requested_only_when_dirty(session):

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from iw_agent.cli.output import BOLD, DIM, _c, _reset, pad_visible, truncate_visible
+from iw_agent.cli.output import BOLD, DIM, _c, _reset, highlight_row, pad_visible, truncate_visible
 from iw_agent.modules.nginx.confparse import Block, Comment, Directive, Raw
 from iw_agent.modules.nginx.editor.hints import hint_for_row
 from iw_agent.modules.nginx.editor.rows import Row, RowKind
@@ -22,10 +22,9 @@ _GREEN = "\033[32m"
 _CYAN = "\033[36m"
 _YELLOW = "\033[33m"
 _BLUE = "\033[34m"
-_REVERSE = "\033[7m"
 
 FOOTER_HINTS = (
-    "↑↓ move  → open  ← close  enter edit  a add  s save  x actions  / search  ? help  q quit"
+    "↑↓ move  o on/off  enter edit  a add  s save  x actions  / search  ? help  q quit"
 )
 
 HELP_LINES = [
@@ -43,6 +42,9 @@ HELP_LINES = [
     "  d           delete",
     "  u / Ctrl+Z  undo",
     "  Ctrl+R      redo",
+    "",
+    "Site",
+    "  o           enable or disable this site (symlink + reload)",
     "",
     "File",
     "  s           save (nginx -t + write)",
@@ -75,6 +77,7 @@ class Frame:
     status: str = ""
     read_only: bool = False
     dry_run: bool = False
+    site_enabled: bool = True
     search_label: str = ""
     modal: Modal | None = None
 
@@ -96,6 +99,14 @@ def clamp_scroll(top: int, cursor: int, visible: int, total: int, *, margin: int
     return max(0, min(top, max(0, total - visible)))
 
 
+def _uses_inline_modal(modal: Modal | None) -> bool:
+    if modal is None:
+        return False
+    from iw_agent.cli.tui.widgets import LineEditor, Picker
+
+    return isinstance(modal.widget, (LineEditor, Picker))
+
+
 def render(screen, frame: Frame) -> None:
     width, height = screen.width, screen.height
     screen.clear()
@@ -106,34 +117,36 @@ def render(screen, frame: Frame) -> None:
 
     split = width >= MIN_SPLIT_WIDTH
     left_width = width - RIGHT_PANE_WIDTH - 1 if split else width
+    inline = split and _uses_inline_modal(frame.modal)
 
     screen.set_row(0, _header(frame, width))
 
     visible = body_height(height)
-    if frame.modal is not None:
-        panel = _modal_lines(frame.modal, RIGHT_PANE_WIDTH if split else width, visible)
+    if inline:
+        detail = _detail_lines(frame, editing=True)
+        left_lines = _left_pane_lines(frame, left_width, visible)
+    elif frame.modal is not None and split:
+        detail = _modal_lines(frame.modal, RIGHT_PANE_WIDTH, visible)
+        left_lines = _left_pane_lines(frame, left_width, visible)
+    elif split:
+        detail = _detail_lines(frame)
+        left_lines = _left_pane_lines(frame, left_width, visible)
     else:
-        panel = _detail_lines(frame) if split else []
-    detail = panel
+        detail = []
+        left_lines = _left_pane_lines(frame, left_width, visible)
 
-    if not split and frame.modal is not None:
-        # no room for a side panel: the modal takes the bottom of the screen
-        for offset in range(visible):
-            index = frame.top + offset
-            text = ""
-            if index < len(frame.rows):
-                text = _row_text(frame.rows[index], index == frame.cursor, width)
-            screen.set_row(offset + 1, text)
-        for offset, line in enumerate(panel[-min(len(panel), visible):]):
-            screen.set_row(height - 1 - len(panel) + offset, line)
+    if not split and frame.modal is not None and not inline:
+        for offset, line in enumerate(left_lines[:visible]):
+            screen.set_row(offset + 1, line)
+        overlay = _modal_lines(frame.modal, width, visible)
+        start = height - 1 - min(len(overlay), visible // 2)
+        for offset, line in enumerate(overlay[-min(len(overlay), visible // 2) :]):
+            screen.set_row(start + offset, line)
         screen.set_row(height - 1, _footer(frame, width))
         return
 
     for offset in range(visible):
-        index = frame.top + offset
-        left = ""
-        if index < len(frame.rows):
-            left = _row_text(frame.rows[index], index == frame.cursor, left_width)
+        left = left_lines[offset] if offset < len(left_lines) else ""
         if not split:
             screen.set_row(offset + 1, left)
             continue
@@ -148,6 +161,10 @@ def render(screen, frame: Frame) -> None:
 
 def _header(frame: Frame, width: int) -> str:
     flags = []
+    if frame.site_enabled:
+        flags.append(f"{_c(_GREEN)}● LIVE{_reset()}")
+    else:
+        flags.append(f"{_c(DIM)}○ OFF{_reset()}")
     if frame.dry_run:
         flags.append(f"{_c(_YELLOW)}dry-run{_reset()}")
     if frame.read_only:
@@ -166,9 +183,41 @@ def _footer(frame: Frame, width: int) -> str:
     return truncate_visible(f"{_c(DIM)} {text}{_reset()}", width)
 
 
-def _row_text(row: Row, selected: bool, width: int) -> str:
+def _left_pane_lines(frame: Frame, width: int, visible: int) -> list[str]:
+    from iw_agent.cli.tui.widgets import LineEditor, Picker
+
+    out: list[str] = []
+    index = frame.top
+    while len(out) < visible and index < len(frame.rows):
+        if (
+            index == frame.cursor
+            and frame.modal is not None
+            and isinstance(frame.modal.widget, LineEditor)
+        ):
+            out.append(_inline_editor_row(frame, width))
+            index += 1
+            continue
+        if (
+            index == frame.cursor
+            and frame.modal is not None
+            and isinstance(frame.modal.widget, Picker)
+        ):
+            remaining = visible - len(out)
+            picker_lines = _inline_picker_rows(frame.modal.widget, width, remaining)
+            out.extend(picker_lines)
+            index += 1
+            continue
+        selected = index == frame.cursor and frame.modal is None
+        out.append(_row_text(frame.rows[index], selected=selected, width=width))
+        index += 1
+    while len(out) < visible:
+        out.append("")
+    return out[:visible]
+
+
+def _row_text(row: Row, *, selected: bool, width: int, editing: bool = False) -> str:
     number = f"{row.line_no:>4} " if row.line_no else "   · "
-    marker = "▸" if selected else " "
+    marker = "▸" if selected or editing else " "
 
     if row.kind is RowKind.ADD_SLOT:
         body = f"{'  ' * row.depth}{_c(_GREEN)}{row.text}{_reset()}"
@@ -184,9 +233,33 @@ def _row_text(row: Row, selected: bool, width: int) -> str:
         body = row.text
 
     line = f"{_c(DIM)}{number}{_reset()}{marker} {body}"
+    if editing:
+        return truncate_visible(highlight_row(line, editing=True, width=width), width)
     if selected:
-        line = f"{_c(_REVERSE)}{pad_visible(line, width)}{_reset()}"
+        return truncate_visible(highlight_row(line, selected=True, width=width), width)
     return truncate_visible(line, width)
+
+
+def _inline_editor_row(frame: Frame, width: int) -> str:
+    from iw_agent.cli.tui.widgets import LineEditor
+
+    widget = frame.modal.widget
+    assert isinstance(widget, LineEditor)
+    row = frame.rows[frame.cursor]
+    number = f"{row.line_no:>4} " if row.line_no else "   · "
+    prefix = f"{_c(DIM)}{number}{_reset()}▸ "
+    field = widget.display(max(8, width - 12))
+    line = f"{prefix}{_c(BOLD)}{field}{_reset()}"
+    return truncate_visible(highlight_row(line, editing=True, width=width), width)
+
+
+def _inline_picker_rows(picker, width: int, max_rows: int) -> list[str]:
+    lines = [truncate_visible(highlight_row(f" {_c(_GREEN)}filter:{_reset()} {picker.filter}█", editing=True, width=width), width)]
+    for item_line in picker.lines(max(1, max_rows - 2)):
+        styled = f" {item_line}"
+        lines.append(truncate_visible(highlight_row(styled, editing=True, width=width), width))
+    lines.append(truncate_visible(highlight_row(f" {_c(DIM)}↑↓ pick  enter add  esc cancel{_reset()}", editing=True, width=width), width))
+    return lines[:max_rows]
 
 
 def _modal_lines(modal: Modal, width: int, height: int) -> list[str]:
@@ -225,7 +298,7 @@ def _modal_lines(modal: Modal, width: int, height: int) -> list[str]:
     return lines
 
 
-def _detail_lines(frame: Frame) -> list[str]:
+def _detail_lines(frame: Frame, *, editing: bool = False) -> list[str]:
     if not frame.rows:
         return []
     row = frame.rows[min(frame.cursor, len(frame.rows) - 1)]
@@ -245,6 +318,9 @@ def _detail_lines(frame: Frame) -> list[str]:
     lines += _panel_section("What", hint.what, width)
     lines += _panel_section("Changes", hint.changes, width)
     lines += _panel_section("Add here", hint.add_here, width)
+
+    if editing and frame.modal is not None:
+        lines += _panel_section("Editing", "Type in the config pane on the left — this side is reference only.", width)
 
     dim, reset = _c(DIM), _reset()
     if row.kind is RowKind.ADD_SLOT:

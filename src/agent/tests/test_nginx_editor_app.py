@@ -62,7 +62,7 @@ def test_vim_keys_work_too(session):
 
 def test_end_jumps_to_the_add_slot(session):
     session.handle(Key.END)
-    assert _text(session) == "+ add server block"
+    assert _text(session) == "+ add comment or spacing"
 
 
 def test_home_returns_to_the_top(session):
@@ -141,7 +141,7 @@ def test_rendered_frame_shows_the_file_and_the_add_slots(session):
     assert "server {" in body
     assert "proxy_pass http://127.0.0.1:3000;" in body
     assert "+ add directive" in body
-    assert "+ add server block" in body
+    assert "+ add comment or spacing" in body
     assert "demo.test" in body
 
 

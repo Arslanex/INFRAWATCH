@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from iw_agent.modules.nginx.confparse import Block, Comment, Directive, Document, Node, Raw
-from iw_agent.modules.nginx.editor.catalog import DOCUMENT_CONTEXT, options_for
+from iw_agent.modules.nginx.editor.catalog import options_for, options_for_insert
 from iw_agent.modules.nginx.editor.forms import form_for
 from iw_agent.modules.nginx.editor.rows import Row, RowKind
 
@@ -239,16 +239,19 @@ def _add_slot_hint(row: Row) -> RowHint:
     else:
         parent_name = getattr(parent, "name", "") or "block"
 
-    options = options_for(
-        DOCUMENT_CONTEXT if isinstance(parent, Document) else getattr(parent, "name", ""),
+    insert_index = row.insert_index if row.insert_index is not None else 0
+    options = (
+        options_for_insert(parent, insert_index)
+        if parent is not None
+        else options_for(DOCUMENT_CONTEXT)
     )
     preview = ", ".join(option.label for option in options[:5])
     if len(options) > 5:
         preview = f"{preview}, …"
 
     if isinstance(parent, Document):
-        what = "End of the config file — new top-level blocks go here."
-        changes = "Adding inserts a new server or upstream block into this file."
+        what = "End of the config file — comments and spacing only here."
+        changes = "This site file already has its server block; use New site for another domain."
     elif getattr(parent, "name", "") == "server":
         what = "Inside a server block — new directives or locations go here."
         changes = "Adding changes how this website handles matching requests."
@@ -271,12 +274,13 @@ def _add_options_summary(parent) -> str:
     if parent is None:
         return "directives, comments"
     if isinstance(parent, Document):
-        context = DOCUMENT_CONTEXT
+        options = options_for_insert(parent, len(parent.children))
     elif isinstance(parent, str):
-        context = parent
+        options = options_for(parent)
+    elif isinstance(parent, Block):
+        options = options_for_insert(parent, len(parent.children))
     else:
-        context = getattr(parent, "name", "") or ""
-    options = options_for(context)
+        options = options_for(getattr(parent, "name", "") or "")
     if not options:
         return "directives, comments"
     labels = [option.label for option in options[:4]]

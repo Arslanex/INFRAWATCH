@@ -59,7 +59,7 @@ def test_the_file_ends_with_an_add_server_slot():
     rows = _rows("simple_proxy.conf")
 
     assert rows[-1].kind is RowKind.ADD_SLOT
-    assert rows[-1].text == "+ add server block"
+    assert rows[-1].text == "+ add comment or spacing"
     assert rows[-1].insert_index == len(_doc("simple_proxy.conf").children)
 
 

@@ -388,6 +388,7 @@ async def _open_editor(args: argparse.Namespace, host: VirtualHost) -> None:
         title=host.server_names[0] if host.server_names else Path(host.config_path).name,
         read_only=not has_effective_root() and not dry_run,
         dry_run=dry_run,
+        site_enabled=host.enabled,
         action_params={
             "nginx_binary": args.nginx_binary,
             "timeout": args.timeout,

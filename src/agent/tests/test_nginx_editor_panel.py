@@ -66,6 +66,18 @@ def test_buffer_only_entries_appear_only_when_dirty(session):
     assert "diff" in messy and "revert" in messy
 
 
+def test_live_site_shows_disable_not_enable():
+    keys = {a.key for a in panel.available(dirty=False, site_enabled=True)}
+    assert "disable" in keys
+    assert "enable" not in keys
+
+
+def test_off_site_shows_enable_not_disable():
+    keys = {a.key for a in panel.available(dirty=False, site_enabled=False)}
+    assert "enable" in keys
+    assert "disable" not in keys
+
+
 # --- local actions --------------------------------------------------------
 
 def test_show_changes_opens_a_diff_viewer(session):

@@ -42,10 +42,22 @@ ACTIONS: tuple = (
 )
 
 
-def available(*, dirty: bool) -> list:
-    """Hide the buffer-only entries when there is nothing unsaved."""
-    return [
-        action
-        for action in ACTIONS
-        if not (action.key in {"diff", "revert"} and not dirty)
-    ]
+def action_for(action_id: str) -> PanelAction | None:
+    for action in ACTIONS:
+        if action.action_id == action_id:
+            return action
+    return None
+
+
+def available(*, dirty: bool, site_enabled: bool | None = None) -> list:
+    """Hide buffer-only entries and show enable *or* disable, not both."""
+    out = []
+    for action in ACTIONS:
+        if action.key in {"diff", "revert"} and not dirty:
+            continue
+        if site_enabled is True and action.key == "enable":
+            continue
+        if site_enabled is False and action.key == "disable":
+            continue
+        out.append(action)
+    return out
