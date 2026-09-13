@@ -4,9 +4,14 @@ import argparse
 
 from iw_agent.cli.output import (
     emit_models,
+    format_exit_code,
     format_optional,
-    print_result_count,
-    print_table,
+    print_column_guide,
+    print_data_table,
+    print_empty,
+    print_insight,
+    print_report,
+    print_section,
 )
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.modules.cron.collector import collect_cron_jobs
@@ -16,10 +21,22 @@ from iw_agent.modules.cron.state_manager import (
     collect_cron_executions,
 )
 
+CRON_COLUMNS = [
+    ("User", "account that runs the job"),
+    ("Schedule", "when the job runs (cron format)"),
+    ("Command", "what the job executes"),
+]
+
+HISTORY_COLUMNS = [
+    ("When", "start time of the run"),
+    ("Result", "whether the job succeeded"),
+    ("Log file", "where output is stored"),
+]
+
 
 async def run_cron(args: argparse.Namespace) -> None:
     jobs = await collect_cron_jobs()
-    emit_models(jobs, json_output=args.json, render=_render_cron)
+    emit_models(jobs, json_output=args.json, plain=args.plain, render=_render_cron)
 
 
 async def run_cron_history(args: argparse.Namespace) -> None:
@@ -27,40 +44,67 @@ async def run_cron_history(args: argparse.Namespace) -> None:
         log_directory=args.log_directory,
         tail=args.tail,
     )
-    emit_models(executions, json_output=args.json, render=_render_cron_history)
+    emit_models(executions, json_output=args.json, plain=args.plain, render=_render_cron_history)
 
 
 def _render_cron(jobs: list[CronJob]) -> None:
-    print_result_count("cron job", len(jobs))
-    print_table(
-        ["OWNER", "SCHEDULE", "LOG", "COMMAND"],
+    print_report(
+        "Scheduled tasks (cron)",
+        "Automatic jobs that run on a timetable.",
+    )
+    if not jobs:
+        print_empty(
+            "no scheduled jobs",
+            "No crontab entries were found for this server.",
+            "this is normal if you do not use cron.",
+        )
+        return
+
+    print_insight(f"Found {len(jobs)} scheduled job(s).")
+
+    print_section(1, "Job list", "Review what runs automatically and when.")
+    print_data_table(
+        CRON_COLUMNS,
         [
             [
                 job.owner,
                 job.cron_expression,
-                format_optional(job.output_log_path),
-                job.command[:60],
+                job.command[:70],
             ]
             for job in jobs
         ],
-        widths=[12, 18, 28, 40],
     )
+    print_column_guide(CRON_COLUMNS)
 
 
 def _render_cron_history(executions: list[CronJobExecution]) -> None:
-    print_result_count("cron run", len(executions))
-    print_table(
-        ["STARTED", "EXIT", "LOG"],
+    print_report(
+        "Cron job history",
+        "Recent results of scheduled jobs.",
+    )
+    if not executions:
+        print_empty(
+            "no run history",
+            "No .runs log files were found.",
+            "history appears after InfraWatch-managed jobs run.",
+        )
+        return
+
+    print_insight(f"Showing {len(executions)} recent run record(s).")
+
+    print_section(1, "Recent runs", "Exit code 0 means the job finished successfully.")
+    print_data_table(
+        HISTORY_COLUMNS,
         [
             [
-                execution.started_at.isoformat(),
-                str(execution.exit_code),
+                execution.started_at.strftime("%Y-%m-%d %H:%M UTC"),
+                format_exit_code(execution.exit_code),
                 execution.job_log_path,
             ]
             for execution in executions
         ],
-        widths=[26, 6, 36],
     )
+    print_column_guide(HISTORY_COLUMNS)
 
 
 def _configure_history(parser: argparse.ArgumentParser) -> None:

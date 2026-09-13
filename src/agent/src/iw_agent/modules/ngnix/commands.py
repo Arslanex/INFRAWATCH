@@ -6,8 +6,14 @@ from iw_agent.cli.output import (
     emit_json,
     emit_models,
     format_optional,
-    print_result_count,
-    print_table,
+    format_ssl_enabled,
+    print_column_guide,
+    print_data_table,
+    print_empty,
+    print_insight,
+    print_labeled_rows,
+    print_report,
+    print_section,
 )
 from iw_agent.cli.parser import add_timeout_flag
 from iw_agent.cli.registry import CliCommandSpec
@@ -20,13 +26,20 @@ from iw_agent.modules.ngnix.collector import (
 )
 from iw_agent.modules.ngnix.schemas import VirtualHost
 
+NGINX_COLUMNS = [
+    ("Website names", "domains served by this config"),
+    ("Ports", "which ports accept web traffic"),
+    ("Security", "whether HTTPS is configured"),
+    ("Forwards to", "backend app address, if any"),
+]
+
 
 async def run_nginx(args: argparse.Namespace) -> None:
     virtual_hosts = await collect_virtual_hosts(
         nginx_binary=args.nginx_binary,
         timeout=args.timeout,
     )
-    emit_models(virtual_hosts, json_output=args.json, render=_render_nginx)
+    emit_models(virtual_hosts, json_output=args.json, plain=args.plain, render=_render_nginx)
 
 
 async def run_nginx_config(args: argparse.Namespace) -> None:
@@ -50,45 +63,79 @@ async def run_nginx_config(args: argparse.Namespace) -> None:
         )
         return
 
+    print_report(
+        "Nginx configuration dump",
+        "Raw config read from nginx for advanced inspection.",
+    )
+
     if dump_result is None:
-        print("Could not run nginx -T (binary missing or failed to start).")
+        print_empty(
+            "nginx not available",
+            "The nginx program is missing or could not be started.",
+            "install nginx: sudo apt install nginx",
+        )
         return
 
-    print(f"exit code: {dump_result.exit_code}  timed out: {dump_result.timed_out}")
+    print_labeled_rows(
+        [
+            ("Command result", "OK" if dump_result.ok else f"failed (exit {dump_result.exit_code})"),
+            ("Timed out", "yes" if dump_result.timed_out else "no"),
+        ]
+    )
+
     cert_paths = certificate_paths_from_dump(dump_result.stdout)
-    print_result_count("certificate path", len(cert_paths))
-    for cert_path in cert_paths:
-        print(f"  {cert_path}")
+    print_section(1, "Certificate files mentioned", "Paths nginx uses for HTTPS certificates.")
+    if cert_paths:
+        for cert_path in cert_paths:
+            print(f"   • {cert_path}")
+        print()
+    else:
+        print_empty("no certificate paths", "No ssl_certificate lines were found.", "check nginx config.")
 
     if args.show_stdout:
-        print("\n--- nginx -T stdout ---\n")
+        print_section(2, "Raw nginx output", "Full text returned by nginx -T.")
         print(dump_result.stdout)
 
 
 def _render_nginx(virtual_hosts: list[VirtualHost]) -> None:
-    print_result_count("virtual host", len(virtual_hosts))
-    print_table(
-        ["CONFIG", "NAMES", "PORTS", "SSL", "CERT", "UPSTREAM"],
-        [
-            [
-                virtual_host.config_path or "-",
-                ",".join(virtual_host.server_names) or "-",
-                ",".join(str(port) for port in virtual_host.listen_ports) or "-",
-                "yes" if virtual_host.ssl_enabled else "no",
-                format_optional(virtual_host.cert_path),
-                format_optional(virtual_host.upstream),
-            ]
-            for virtual_host in virtual_hosts
-            if virtual_host.parse_ok
-        ],
-        widths=[28, 20, 12, 5, 28, 16],
+    print_report(
+        "Websites (nginx)",
+        "Web addresses and ports configured on this server.",
     )
 
+    parsed = [host for host in virtual_hosts if host.parse_ok]
     unparsed = [host for host in virtual_hosts if not host.parse_ok]
-    for virtual_host in unparsed:
-        print(
-            f"\n  parse error: {format_optional(virtual_host.parse_error)}"
+
+    if not parsed and not unparsed:
+        print_empty(
+            "no websites configured",
+            "Nginx is not installed or has no server blocks.",
+            "install nginx or check /etc/nginx",
         )
+        return
+
+    if parsed:
+        print_insight(f"Found {len(parsed)} website configuration(s).")
+        print_section(1, "Website list", "Each row is one site nginx can serve.")
+        print_data_table(
+            NGINX_COLUMNS,
+            [
+                [
+                    ", ".join(virtual_host.server_names) or "(no name)",
+                    ", ".join(str(port) for port in virtual_host.listen_ports) or "—",
+                    format_ssl_enabled(virtual_host.ssl_enabled),
+                    format_optional(virtual_host.upstream, fallback="—"),
+                ]
+                for virtual_host in parsed
+            ],
+        )
+        print_column_guide(NGINX_COLUMNS)
+
+    if unparsed:
+        print_section(2, "Configuration problems", "These entries could not be read cleanly.")
+        for virtual_host in unparsed:
+            print(f"   • {format_optional(virtual_host.parse_error)}")
+        print()
 
 
 def _configure_nginx(parser: argparse.ArgumentParser) -> None:

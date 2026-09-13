@@ -12,6 +12,11 @@ def add_json_flag(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="print JSON output",
     )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="disable colors and use plain text",
+    )
 
 
 def add_limit_flag(

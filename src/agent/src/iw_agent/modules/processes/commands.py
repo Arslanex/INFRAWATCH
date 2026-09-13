@@ -7,37 +7,72 @@ from iw_agent.cli.output import (
     format_bytes,
     format_optional,
     format_percent,
-    print_result_count,
-    print_table,
+    print_column_guide,
+    print_data_table,
+    print_empty,
+    print_insight,
+    print_report,
+    print_section,
 )
 from iw_agent.cli.parser import add_limit_flag
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.modules.processes.collector import collect_processes
 from iw_agent.modules.processes.schemas import Process
 
+PROCESS_COLUMNS = [
+    ("Program", "name of the running software"),
+    ("CPU", "processor usage right now"),
+    ("Memory", "RAM used by the program"),
+    ("Runs as", "container, service, or other owner"),
+]
+
 
 async def run_processes(args: argparse.Namespace) -> None:
     processes = await collect_processes(args.limit)
-    emit_models(processes, json_output=args.json, render=_render_processes)
+    emit_models(processes, json_output=args.json, plain=args.plain, render=_render_processes)
 
 
 def _render_processes(processes: list[Process]) -> None:
-    print_result_count("process", len(processes))
-    print_table(
-        ["PID", "CPU", "MEMORY", "NAME", "OWNER", "CGROUP"],
+    print_report(
+        "Running programs",
+        "The busiest programs on this server, sorted by CPU usage.",
+    )
+    if not processes:
+        print_empty(
+            "no processes listed",
+            "The agent could not read the process list.",
+            "try: sudo iw processes",
+        )
+        return
+
+    top = processes[0]
+    print_insight(
+        f"The busiest program right now is {top.process_name} "
+        f"using {format_percent(top.cpu_percent)} CPU."
+    )
+
+    print_section(1, "Top programs", "Highest CPU usage at this moment.")
+    print_data_table(
+        PROCESS_COLUMNS,
         [
             [
-                str(process.pid),
+                process.process_name,
                 format_percent(process.cpu_percent),
                 format_bytes(process.memory_rss_bytes),
-                process.process_name,
-                format_optional(process.cgroup_owner),
-                format_optional(process.cgroup_type),
+                _owner_label(process),
             ]
             for process in processes
         ],
-        widths=[8, 8, 10, 16, 20, 12],
     )
+    print_column_guide(PROCESS_COLUMNS)
+
+
+def _owner_label(process: Process) -> str:
+    if process.cgroup_type == "container" and process.container_id:
+        return f"docker container {process.container_id}"
+    if process.systemd_unit:
+        return f"service {process.systemd_unit}"
+    return format_optional(process.cgroup_owner, fallback="this server")
 
 
 def _configure(parser: argparse.ArgumentParser) -> None:
