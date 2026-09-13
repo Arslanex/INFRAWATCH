@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from iw_agent.cli.output import (
+    clear_screen,
     emit_json,
     emit_models,
     format_optional,
@@ -63,6 +64,7 @@ async def run_nginx_config(args: argparse.Namespace) -> None:
         )
         return
 
+    clear_screen()
     print_report(
         "Nginx configuration dump",
         "Raw config read from nginx for advanced inspection.",

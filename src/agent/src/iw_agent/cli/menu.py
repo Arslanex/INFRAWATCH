@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from iw_agent.cli.output import print_banner
+from iw_agent.cli.output import clear_screen, print_banner
 from iw_agent.cli.registry import collect_command_specs
 from iw_agent.cli.runner import run_async
 
@@ -13,11 +13,12 @@ def run_menu() -> int:
 
 
 async def _interactive_menu() -> None:
-    print_banner()
     specs = collect_command_specs()
 
     while True:
-        print("\nWhat do you want to check?\n")
+        clear_screen()
+        print_banner()
+        print("What do you want to check?\n")
         for index, spec in enumerate(specs, start=1):
             print(f"  {index:2}. {spec.name:<16} {spec.help}")
         print("   0. exit")

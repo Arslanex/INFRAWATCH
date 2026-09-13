@@ -9,6 +9,7 @@ from iw_agent.cli.output import (
     format_optional,
     format_usage_ratio,
     format_bytes,
+    format_disk_status,
     print_column_guide,
     print_data_table,
     print_insight,
@@ -32,12 +33,22 @@ async def run_device(args: argparse.Namespace) -> None:
 
 async def run_metrics(args: argparse.Namespace) -> None:
     metrics = await collect_device_metrics()
-    emit_models(metrics, json_output=args.json, plain=args.plain, render=_render_metrics)
+    emit_models(
+        metrics,
+        json_output=args.json,
+        plain=args.plain,
+        render=lambda data: _render_metrics(data, standalone=True),
+    )
 
 
 async def run_disks(args: argparse.Namespace) -> None:
     disks = await collect_disk_volumes()
-    emit_models(disks, json_output=args.json, plain=args.plain, render=_render_disks)
+    emit_models(
+        disks,
+        json_output=args.json,
+        plain=args.plain,
+        render=lambda data: _render_disks(data, standalone=True),
+    )
 
 
 def _render_device(snapshot: DeviceSnapshot) -> None:
@@ -66,7 +77,38 @@ def _render_device(snapshot: DeviceSnapshot) -> None:
     _render_disks(snapshot.disks, step=3)
 
 
-def _render_metrics(metrics: DeviceMetrics, *, step: int = 1) -> None:
+def _metrics_summary(metrics: DeviceMetrics) -> str:
+    cpu = f"{metrics.cpu_percent:.0f}%" if metrics.cpu_percent is not None else "unknown"
+    if metrics.memory_used_bytes is not None and metrics.memory_total_bytes:
+        mem_pct = (metrics.memory_used_bytes / metrics.memory_total_bytes) * 100
+        memory = f"{mem_pct:.0f}% RAM used"
+    else:
+        memory = "memory unknown"
+    load = f"load {metrics.load_1:.2f}" if metrics.load_1 is not None else "load unknown"
+    return f"CPU at {cpu}, {memory}, {load}."
+
+
+def _disks_summary(disks: list[DiskVolume]) -> str:
+    if not disks:
+        return "No disk usage information could be read."
+    full = [
+        disk
+        for disk in disks
+        if disk.total_bytes > 0 and (disk.used_bytes / disk.total_bytes) >= 0.9
+    ]
+    if full:
+        names = ", ".join(disk.mount_point for disk in full[:3])
+        return f"Found {len(disks)} disk(s). Warning: {names} is almost full."
+    return f"Found {len(disks)} disk partition(s); none are critically full."
+
+
+def _render_metrics(metrics: DeviceMetrics, *, step: int = 1, standalone: bool = False) -> None:
+    if standalone:
+        print_report(
+            "Server workload",
+            "How busy the processor, memory, and system are right now.",
+        )
+        print_insight(_metrics_summary(metrics))
     print_section(step, "Current workload", "How busy the server is right now.")
     print_labeled_rows(
         [
@@ -81,12 +123,18 @@ def _render_metrics(metrics: DeviceMetrics, *, step: int = 1) -> None:
     )
 
 
-def _render_disks(disks: list[DiskVolume], *, step: int = 1) -> None:
+def _render_disks(disks: list[DiskVolume], *, step: int = 1, standalone: bool = False) -> None:
     disk_columns = [
         ("Folder", "where data is stored on the server"),
         ("Used / total", "how much space is used"),
         ("Status", "how full the disk is"),
     ]
+    if standalone:
+        print_report(
+            "Storage space",
+            "How much room is left on each disk partition.",
+        )
+        print_insight(_disks_summary(disks))
     print_section(step, "Storage space", "How full each disk partition is.")
     if not disks:
         from iw_agent.cli.output import print_empty
@@ -104,23 +152,12 @@ def _render_disks(disks: list[DiskVolume], *, step: int = 1) -> None:
             [
                 disk.mount_point,
                 f"{format_bytes(disk.used_bytes)} / {format_bytes(disk.total_bytes)}",
-                _disk_status(disk.used_bytes, disk.total_bytes),
+                format_disk_status(disk.used_bytes, disk.total_bytes),
             ]
             for disk in disks
         ],
     )
     print_column_guide(disk_columns)
-
-
-def _disk_status(used_bytes: int, total_bytes: int) -> str:
-    if total_bytes <= 0:
-        return "unknown"
-    percent = (used_bytes / total_bytes) * 100
-    if percent >= 90:
-        return "critically full"
-    if percent >= 75:
-        return "getting full"
-    return "ok"
 
 
 COMMAND_SPECS = [

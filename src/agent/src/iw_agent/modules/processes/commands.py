@@ -57,7 +57,7 @@ def _render_processes(processes: list[Process]) -> None:
         [
             [
                 process.process_name,
-                format_percent(process.cpu_percent),
+                format_percent(process.cpu_percent, colorize=True),
                 format_bytes(process.memory_rss_bytes),
                 _owner_label(process),
             ]

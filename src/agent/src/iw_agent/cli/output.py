@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
@@ -9,6 +10,7 @@ from typing import Any, Callable, Sequence
 from iw_agent.core.schemas import AgentModel
 
 _plain_mode = False
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 
 def configure_output(*, plain: bool = False) -> None:
@@ -31,6 +33,33 @@ GREEN = "\033[32m"
 YELLOW = "\033[33m"
 RED = "\033[31m"
 BLUE = "\033[34m"
+MAGENTA = "\033[35m"
+
+COLUMN_COLORS = (CYAN, YELLOW, GREEN, BLUE, MAGENTA)
+
+
+def clear_screen() -> None:
+    if _plain_mode:
+        print()
+        return
+    print("\033[2J\033[H", end="")
+
+
+def _visible_length(text: str) -> int:
+    return len(_ANSI_RE.sub("", text))
+
+
+def _pad_visible(text: str, width: int) -> str:
+    padding = width - _visible_length(text)
+    if padding <= 0:
+        return text
+    return text + (" " * padding)
+
+
+def _color_cell(text: str, color: str) -> str:
+    if _plain_mode or _ANSI_RE.search(text):
+        return text
+    return f"{_c(color)}{text}{_reset()}"
 
 
 def print_banner() -> None:
@@ -67,7 +96,9 @@ def print_labeled_rows(rows: list[tuple[str, str]]) -> None:
         return
     width = max(len(label) for label, _ in rows)
     for label, value in rows:
-        print(f"   {label:<{width}}  {value}")
+        print(
+            f"   {_c(BOLD)}{_c(CYAN)}{label:<{width}}{_reset()}  {value}"
+        )
     print()
 
 
@@ -88,26 +119,41 @@ def print_data_table(
         return
 
     widths = [
-        max(len(headers[index]), *(len(row[index]) for row in rows))
+        max(
+            len(headers[index]),
+            *(_visible_length(row[index]) for row in rows),
+        )
         for index in range(len(headers))
     ]
-    header_line = "   " + "  ".join(
-        f"{_c(BOLD)}{headers[index]:<{widths[index]}}{_reset()}"
-        for index in range(len(headers))
-    )
-    print(header_line)
-    for row in rows:
-        print(
-            "   "
-            + "  ".join(row[index].ljust(widths[index]) for index in range(len(headers)))
+    separator = f"{_c(DIM)} │ {_reset()}"
+
+    header_parts = []
+    for index, header in enumerate(headers):
+        color = COLUMN_COLORS[index % len(COLUMN_COLORS)]
+        header_parts.append(
+            _pad_visible(
+                f"{_c(BOLD)}{_c(color)}{header}{_reset()}",
+                widths[index],
+            )
         )
+    print("   " + separator.join(header_parts))
+
+    for row in rows:
+        row_parts = []
+        for index, cell in enumerate(row):
+            color = COLUMN_COLORS[index % len(COLUMN_COLORS)]
+            row_parts.append(_pad_visible(_color_cell(cell, color), widths[index]))
+        print("   " + separator.join(row_parts))
     print()
 
 
 def print_column_guide(columns: list[tuple[str, str]]) -> None:
     print(f"   {_c(DIM)}What the columns mean:{_reset()}")
-    for header, explanation in columns:
-        print(f"   {_c(DIM)}  • {header}:{_reset()} {explanation}")
+    for index, (header, explanation) in enumerate(columns):
+        color = COLUMN_COLORS[index % len(COLUMN_COLORS)]
+        print(
+            f"   {_c(color)}  • {header}:{_reset()} {_c(DIM)}{explanation}{_reset()}"
+        )
     print()
 
 
@@ -128,10 +174,30 @@ def format_bytes(value: int | None) -> str:
     return f"{value / (1024 ** 3):.1f} GB"
 
 
-def format_percent(value: float | None) -> str:
+def format_percent(value: float | None, *, colorize: bool = False) -> str:
     if value is None:
         return "unknown"
-    return f"{value:.1f}%"
+    text = f"{value:.1f}%"
+    if not colorize:
+        return text
+    if value >= 85:
+        color = RED
+    elif value >= 50:
+        color = YELLOW
+    else:
+        color = GREEN
+    return f"{_c(color)}{text}{_reset()}"
+
+
+def format_disk_status(used_bytes: int, total_bytes: int) -> str:
+    if total_bytes <= 0:
+        return "unknown"
+    percent = (used_bytes / total_bytes) * 100
+    if percent >= 90:
+        return f"{_c(RED)}critically full{_reset()}"
+    if percent >= 75:
+        return f"{_c(YELLOW)}getting full{_reset()}"
+    return f"{_c(GREEN)}ok{_reset()}"
 
 
 def format_optional(value: Any, *, fallback: str = "unknown") -> str:
@@ -224,4 +290,5 @@ def emit_models(
     if json_output:
         emit_json(payload)
         return
+    clear_screen()
     render(payload)
