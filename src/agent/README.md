@@ -1,8 +1,8 @@
 # InfraWatch Agent
 
-Read-only collectors for server inspection: processes, network, Docker, nginx, SSL certificates, cron jobs, and device metrics.
+Server inspection and local operations: processes, network, Docker, nginx, SSL certificates, cron jobs, device metrics, and **project register/publish**.
 
-This package is the InfraWatch **agent layer**. Collectors are read-only; module **executors** handle writes. The CLI (`iw`) calls executors via `ActionService` in `core/`.
+Collectors are read-only; module **executors** handle writes (nginx reload, certbot, docker compose, cron edits, project deploy). The CLI (`iw`) routes actions through `ActionService` with confirmation prompts and an audit log.
 
 ## Requirements
 
@@ -11,7 +11,7 @@ This package is the InfraWatch **agent layer**. Collectors are read-only; module
 
 ## Install
 
-**Recommended** — from the repository root (installs OS Python on Linux + all pip packages):
+**Recommended** — from the repository root:
 
 ```bash
 sudo ./setup-agent.sh --system
@@ -26,11 +26,9 @@ source .venv/bin/activate
 iw --help
 ```
 
-The setup script installs these Python packages automatically:
+The setup script installs: `psutil`, `pydantic`, `httpx`, `python-crontab`, `cryptography`
 
-`psutil`, `pydantic`, `httpx`, `python-crontab`, `cryptography`
-
-On Linux as root it also installs system packages: `python3`, `python3-venv`, build tools, `libffi`, `openssl`, `libcap`, `cron`, and (with `--system`) `nginx` and `docker.io` when available.
+On Linux as root it can also install: `python3`, `python3-venv`, build tools, `libffi`, `openssl`, `libcap`, `cron`, and (with `--system`) `nginx`, `docker.io`, and certbot when available.
 
 Without installing, run from source:
 
@@ -39,8 +37,6 @@ PYTHONPATH=src python -m iw_agent device
 ```
 
 ## CLI
-
-Commands are flat and plain English:
 
 | Command | Description |
 |---------|-------------|
@@ -57,6 +53,7 @@ Commands are flat and plain English:
 | `iw certs` | SSL certificates on disk |
 | `iw cron` | Scheduled cron jobs |
 | `iw cron-history` | Recent cron run results |
+| `iw project` | Registered projects (list, register, publish, deploy, stop) |
 
 ```bash
 iw                      # interactive menu
@@ -66,9 +63,28 @@ iw processes --limit 20
 iw containers --socket /var/run/docker.sock
 iw certs --certbot-dir /etc/letsencrypt/live
 iw cron-history --log-dir logs/cron
+iw project register /path/to/clone --name myapp
+sudo iw project publish myapp --domain app.example.com --backend-port 8000
 ```
 
 Add `--json` on any command for machine-readable output.
+
+**Full reference:** [docs/AGENT-COMMANDS.md](../../docs/AGENT-COMMANDS.md)
+
+## Interactive managers (`-i`)
+
+Use `-i` for full-screen card pickers and action menus (confirm + audit log):
+
+| Command | What you get |
+|---------|----------------|
+| `sudo iw nginx -i` | Site picker → structural config editor; `o` enable/disable |
+| `sudo iw cron -i` | Job picker → run, enable/disable, history |
+| `iw containers -i` | Container picker → start/stop/restart, logs |
+| `sudo iw processes -i` | Process picker → details, kill |
+| `sudo iw certs -i` | Certificate picker → renew, obtain new |
+| `iw project -i` | Project picker → register, publish/deploy, nginx editor |
+
+Add `--dry-run` to preview write actions without applying them.
 
 ## Collectors (Python API)
 
@@ -97,36 +113,38 @@ All models extend `AgentModel` and support `.to_dict()` / `.model_dump()`.
 
 ```
 src/iw_agent/
-├── cli/                 # iw command, menu, output formatting
-├── core/                # logger, exceptions, psutil helpers, subprocess runner
+├── cli/                 # iw command, TUI card pickers, output
+├── core/                # actions, audit log, paths, subprocess runner
 └── modules/
-    ├── device/          # OS, CPU/RAM/load, disks
-    ├── network/         # listening ports + outbound connections
-    ├── processes/       # process list + cgroup attribution
-    ├── docker/          # Docker Engine API (unix socket)
-    ├── nginx/           # schemas, collector, executor, commands
-    ├── ssl/             # schemas, collector, executor, commands
-    └── cron/            # crontab jobs + execution history
+    ├── device/
+    ├── network/
+    ├── processes/
+    ├── docker/
+    ├── nginx/           # collector, executor, structural editor
+    ├── ssl/
+    ├── cron/
+    └── project/         # register, detect, publish/deploy, manifest
 ```
 
 ## Permissions
 
-| Collector | Notes |
-|-----------|--------|
-| `network`, `processes` | Often need root for `psutil.net_connections` / full process list |
+| Area | Notes |
+|------|--------|
+| `network`, `processes` | Often need root for full connection/process lists |
 | `docker` | Requires access to `/var/run/docker.sock` |
-| `nginx`, `ssl` | Needs read access to nginx config and certificate files |
-| `cron` | User crontabs readable by owner; system crontabs may need root |
-| `device` | Usually works without root; some mount points may be skipped |
+| `nginx`, `ssl` | Read configs/certs; writes need root |
+| `cron` | User crontabs editable by owner; system crontabs may need root |
+| `project` | Deploy/publish nginx + compose usually needs root |
+| `device` | Usually works without root |
 
-On failure, privileged collectors raise typed errors (e.g. `NetworkAccessDeniedError`). Optional services (Docker, nginx) return empty results instead of crashing.
+Write actions are logged to `logs/actions.log`. On failure, collectors raise typed errors; optional services (Docker, nginx) return empty results instead of crashing.
 
 ## Development
 
 ```bash
-pip install .
+pip install -e .
+pytest
 iw metrics
-python -m iw_agent.modules.device.collector
 ```
 
 Logs: debug lines are hidden in CLI mode; errors still go to `logs/error.log` when written.

@@ -2,7 +2,7 @@
 
 InfraWatch monitors your servers from the inside out: a lightweight agent reads what each host is doing, a central service stores and alerts on that data, and a dashboard lets you inspect and operate your infrastructure from one place.
 
-This repository is under active development. **Only the agent collectors are implemented today.** Other components will be added here as they land.
+This repository is under active development. **The agent (collectors + CLI + local executors) is implemented today.** Core and dashboard are planned.
 
 ## Architecture (planned)
 
@@ -15,21 +15,20 @@ This repository is under active development. **Only the agent collectors are imp
 
 | Component | Path | Status |
 |-----------|------|--------|
-| **Agent** | [`src/agent/`](src/agent/) | **In progress** — collectors + CLI |
+| **Agent** | [`src/agent/`](src/agent/) | **In progress** — collectors, CLI, executors |
 | Core (server) | `src/server/` | Planned |
 | Dashboard (console) | `src/console/` | Planned |
 
-The agent runs on each monitored machine. It collects read-only snapshots (processes, ports, Docker, nginx, certificates, cron, device metrics) and will stream them to core. Core persists the data and sends commands back (start a project, renew a certificate, apply nginx config, and similar). The dashboard is the operator UI on top of core.
+The agent runs on each monitored machine. It collects snapshots (processes, ports, Docker, nginx, certificates, cron, device metrics) and applies local changes through audited executors (nginx reload, certbot, docker compose, cron edits, project deploy/publish). Core and the dashboard will sit on top of that transport layer.
 
 ## What works today
 
-The agent package provides:
+- **Collectors** — read-only module APIs under `src/agent/src/iw_agent/modules/`
+- **CLI (`iw`)** — inspect the host and run interactive managers with `-i`
+- **Executors** — nginx (structural editor + site enable/disable), SSL/certbot, Docker, cron, processes, **project register/publish**
+- **Interactive TUI** — full-screen card pickers for nginx, cron, containers, processes, certs, and projects
 
-- **Collectors** — modular Python APIs under `src/agent/src/iw_agent/modules/`
-- **CLI** — `iw` for local inspection on a host (`iw device`, `iw ports`, `iw containers`, …)
-- **Typed errors** — per-service exception classes for privilege and availability failures
-
-Not yet in this repo: the long-running daemon, WebSocket transport to core, command executors (nginx, certbot, cron, projects), and install/service packaging.
+Not yet in this repo: long-running daemon, WebSocket transport to core, remote command queue from a central server.
 
 ## Quick start (agent)
 
@@ -39,9 +38,10 @@ From the repository root on a **fresh Linux server**:
 sudo ./setup-agent.sh --system
 iw device
 iw ports
+sudo iw nginx -i
 ```
 
-The setup script installs system Python, build libraries, pip dependencies, and links `iw` to `/usr/local/bin`.
+The setup script installs Python, pip dependencies, optional nginx/docker/certbot, and links `iw` to `/usr/local/bin`.
 
 Manual install (Python 3.9+ already present):
 
@@ -51,21 +51,37 @@ source .venv/bin/activate
 iw device
 ```
 
-Full agent documentation: **[src/agent/README.md](src/agent/README.md)**
+**Proxy app (uvicorn, etc.) — typical flow:**
+
+```bash
+iw project register /path/to/app --name myapp
+# start your app (systemd or uvicorn on 127.0.0.1:8000)
+sudo iw project publish myapp --domain app.example.com --backend-port 8000
+```
+
+## Documentation
+
+| Doc | Description |
+|-----|-------------|
+| [src/agent/README.md](src/agent/README.md) | Agent install, modules, development |
+| [docs/AGENT-COMMANDS.md](docs/AGENT-COMMANDS.md) | Full `iw` command reference (flags, `-i` keys, examples) |
 
 ## Repository layout
 
 ```
 infrawatch/
-├── README.md           # this file — project overview
+├── README.md
+├── setup-agent.sh
+├── docs/
+│   └── AGENT-COMMANDS.md
 └── src/
-    └── agent/          # server agent (collectors + iw CLI)
+    └── agent/
         ├── README.md
         ├── requirements.txt
         ├── pyproject.toml
         └── src/iw_agent/
-            ├── cli/
-            ├── core/
+            ├── cli/           # iw command, TUI, output
+            ├── core/          # actions, audit log, paths
             └── modules/
                 ├── device/
                 ├── network/
@@ -73,14 +89,15 @@ infrawatch/
                 ├── docker/
                 ├── nginx/
                 ├── ssl/
-                └── cron/
+                ├── cron/
+                └── project/
 ```
 
 ## Requirements
 
 - Python 3.9+
 - Linux or macOS for development (production targets Linux servers)
-- Some agent commands need elevated privileges (network connections, system crontabs) or optional services (Docker, nginx)
+- Some commands need elevated privileges (`sudo iw …`) or optional services (Docker, nginx)
 
 ## License
 
