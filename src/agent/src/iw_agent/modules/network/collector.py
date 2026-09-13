@@ -137,13 +137,12 @@ def _outbound_destination_counts(
     destination_counts: Counter[tuple[int | None, str, int]] = Counter()
 
     for connection in connections:
-        if (
-            connection.status != psutil.CONN_ESTABLISHED
-            or not connection.raddr
-            or not connection.laddr
+        protocol = _socket_protocol(connection)
+        if not _is_outbound_connection(
+            connection,
+            listening_port_numbers,
+            protocol,
         ):
-            continue
-        if connection.laddr.port in listening_port_numbers:
             continue
 
         destination_counts[
@@ -191,6 +190,32 @@ def _build_outbound_connections(
 
 def _socket_protocol(connection) -> str | None:
     return PROTOCOL_BY_SOCKET_TYPE.get(connection.type)
+
+
+def _is_outbound_connection(
+    connection,
+    listening_port_numbers: set[int],
+    protocol: str | None,
+) -> bool:
+    if protocol is None or not connection.raddr or not connection.laddr:
+        return False
+    if connection.laddr.port in listening_port_numbers:
+        return False
+
+    if protocol == "tcp":
+        return connection.status in {
+            psutil.CONN_ESTABLISHED,
+            psutil.CONN_SYN_SENT,
+        }
+
+    if protocol == "udp":
+        return connection.status in {
+            psutil.CONN_NONE,
+            psutil.CONN_ESTABLISHED,
+            "",
+        }
+
+    return False
 
 
 def _is_listening(connection, protocol: str) -> bool:

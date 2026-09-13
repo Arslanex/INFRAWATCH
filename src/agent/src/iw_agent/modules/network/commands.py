@@ -97,7 +97,10 @@ def _ports_summary(ports: list[ListeningPort]) -> str:
 
 def _connections_summary(connections: list[OutboundConnection]) -> str:
     if not connections:
-        return "No outbound connections are active right now."
+        return (
+            "No outbound connections right now — normal if the server is idle "
+            "(no apt, curl, DB, or DNS traffic at this instant)."
+        )
     total_links = sum(connection.connection_count for connection in connections)
     programs = {connection.process_name for connection in connections if connection.process_name}
     top = connections[0]
@@ -161,8 +164,8 @@ def _render_connections(
     if not connections:
         print_empty(
             "no outbound connections",
-            "Either nothing is connected right now, or access was denied.",
-            "try: sudo iw connections",
+            "Shows programs connecting out (TCP + UDP). Inbound visitor traffic is not listed here.",
+            "verify on server: ss -tupn  ·  or trigger traffic: curl https://example.com",
         )
         return
 

@@ -4,11 +4,15 @@ import argparse
 from datetime import datetime, timezone
 
 from iw_agent.cli.output import (
+    DIM,
+    _c,
+    _reset,
+    cert_expiry_details,
     emit_models,
+    format_horizontal_bar,
     format_optional,
-    print_column_guide,
-    print_data_table,
     print_empty,
+    print_info_card,
     print_insight,
     print_report,
     print_section,
@@ -17,13 +21,6 @@ from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.modules.ssl.collector import DEFAULT_CERTBOT_LIVE_DIR, collect_certificates
 from iw_agent.modules.ssl.schemas import Certificate
 
-CERT_COLUMNS = [
-    ("Website", "domain the certificate protects"),
-    ("Issued by", "certificate authority"),
-    ("Valid until", "expiry date — renew before this"),
-    ("Source", "certbot or manual/nginx path"),
-]
-
 
 async def run_certs(args: argparse.Namespace) -> None:
     certificates = await collect_certificates(
@@ -31,6 +28,55 @@ async def run_certs(args: argparse.Namespace) -> None:
         nginx_cert_paths=args.nginx_paths,
     )
     emit_models(certificates, json_output=args.json, plain=args.plain, render=_render_certs)
+
+
+def _certs_summary(certificates: list[Certificate]) -> str:
+    now = datetime.now(timezone.utc)
+    valid = 0
+    expiring = 0
+    expired = 0
+
+    for certificate in certificates:
+        if certificate.not_after is None:
+            continue
+        expiry = (
+            certificate.not_after
+            if certificate.not_after.tzinfo
+            else certificate.not_after.replace(tzinfo=timezone.utc)
+        )
+        days = (expiry - now).days
+        if days < 0:
+            expired += 1
+        elif days <= 30:
+            expiring += 1
+        else:
+            valid += 1
+
+    return (
+        f"Found {len(certificates)} certificate(s): "
+        f"{valid} valid, {expiring} expiring soon, {expired} expired."
+    )
+
+
+def _render_cert_card(certificate: Certificate) -> None:
+    badge, status_line, bar_percent, tone = cert_expiry_details(certificate.not_after)
+    bar = format_horizontal_bar(bar_percent, width=24)
+
+    lines = [
+        status_line,
+        f"[{bar}]",
+        f"{_c(DIM)}issuer:{_reset()} {format_optional(certificate.issuer, fallback='unknown')}",
+        f"{_c(DIM)}source:{_reset()} {certificate.source}",
+        f"{_c(DIM)}file:{_reset()} {certificate.cert_path}",
+    ]
+
+    print_info_card(
+        badge=badge,
+        title=certificate.domain,
+        lines=lines,
+        tone=tone,
+        strike_title=tone == "bad",
+    )
 
 
 def _render_certs(certificates: list[Certificate]) -> None:
@@ -46,38 +92,45 @@ def _render_certs(certificates: list[Certificate]) -> None:
         )
         return
 
-    print_insight(f"Found {len(certificates)} certificate(s) on this server.")
+    print_insight(_certs_summary(certificates))
 
-    print_section(1, "Certificate list", "Make sure expiry dates are in the future.")
-    print_data_table(
-        CERT_COLUMNS,
-        [
-            [
-                certificate.domain,
-                format_optional(certificate.issuer, fallback="unknown"),
-                _expiry_label(certificate.not_after),
-                certificate.source,
-            ]
-            for certificate in certificates
-        ],
-    )
-    print_column_guide(CERT_COLUMNS)
+    expired = []
+    expiring = []
+    valid = []
+    unknown = []
 
+    for certificate in certificates:
+        if certificate.not_after is None:
+            unknown.append(certificate)
+            continue
+        expiry = (
+            certificate.not_after
+            if certificate.not_after.tzinfo
+            else certificate.not_after.replace(tzinfo=timezone.utc)
+        )
+        days = (expiry - datetime.now(timezone.utc)).days
+        if days < 0:
+            expired.append(certificate)
+        elif days <= 30:
+            expiring.append(certificate)
+        else:
+            valid.append(certificate)
 
-def _expiry_label(not_after: datetime | None) -> str:
-    if not_after is None:
-        return "unknown"
-    now = datetime.now(timezone.utc)
-    expiry = not_after if not_after.tzinfo else not_after.replace(tzinfo=timezone.utc)
-    days = (expiry - now).days
-    text = expiry.strftime("%Y-%m-%d")
-    if days < 0:
-        return f"{text} (expired)"
-    if days <= 14:
-        return f"{text} (renew soon — {days} days left)"
-    if days <= 30:
-        return f"{text} ({days} days left)"
-    return text
+    step = 1
+    groups = [
+        (expired, "Expired certificates", "These no longer protect HTTPS traffic."),
+        (expiring, "Expiring soon", "Renew these before the expiry date."),
+        (valid, "Valid certificates", "These certificates are still good."),
+        (unknown, "Unknown expiry", "Could not read the expiry date."),
+    ]
+
+    for group, title, description in groups:
+        if not group:
+            continue
+        print_section(step, title, description)
+        step += 1
+        for certificate in group:
+            _render_cert_card(certificate)
 
 
 def _configure(parser: argparse.ArgumentParser) -> None:

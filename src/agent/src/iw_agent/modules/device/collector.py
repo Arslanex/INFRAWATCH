@@ -74,12 +74,22 @@ def _read_device_system() -> DeviceSystem:
     )
 
 
+def _read_cpu_metrics(*, sample_seconds: float = 0.1) -> tuple[float, list[float]]:
+    # interval=None on the first call always returns 0.0 (no prior baseline).
+    psutil.cpu_percent(interval=None, percpu=True)
+    per_core = psutil.cpu_percent(interval=sample_seconds, percpu=True)
+    overall = sum(per_core) / len(per_core) if per_core else 0.0
+    return overall, per_core
+
+
 def _read_device_metrics() -> DeviceMetrics:
     load_averages = _read_load_averages()
     network_counters = _read_network_counters()
+    cpu_metrics = _safe_read(_read_cpu_metrics)
 
     return DeviceMetrics(
-        cpu_percent=_safe_read(lambda: psutil.cpu_percent(interval=None)),
+        cpu_percent=cpu_metrics[0] if cpu_metrics else None,
+        cpu_percent_per_core=cpu_metrics[1] if cpu_metrics else None,
         cpu_count_logical=_safe_read(lambda: psutil.cpu_count(logical=True)),
         cpu_count_physical=_safe_read(lambda: psutil.cpu_count(logical=False)),
         memory_used_bytes=_safe_read(lambda: psutil.virtual_memory().used),

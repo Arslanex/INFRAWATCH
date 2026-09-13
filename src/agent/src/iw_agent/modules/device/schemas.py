@@ -24,6 +24,7 @@ class DeviceSystem(AgentModel):
 
 class DeviceMetrics(AgentModel):
     cpu_percent: Optional[float] = None
+    cpu_percent_per_core: Optional[list[float]] = None
     cpu_count_logical: Optional[int] = None
     cpu_count_physical: Optional[int] = None
     memory_used_bytes: Optional[int] = None

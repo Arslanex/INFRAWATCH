@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 
 from iw_agent.core.commands import CommandResult, is_command_available, run_command
 from iw_agent.core.exceptions import (
@@ -18,6 +20,8 @@ DIRECTIVE_PATTERN = re.compile(r"(?P<name>[a-z_]+)\s+(?P<value>[^;{}]+);")
 
 DEFAULT_NGINX_BINARY = "nginx"
 DEFAULT_NGINX_TIMEOUT_SECONDS = 30.0
+DEFAULT_SITES_AVAILABLE_DIR = "/etc/nginx/sites-available"
+DEFAULT_SITES_ENABLED_DIR = "/etc/nginx/sites-enabled"
 MAX_PARSE_ERROR_LENGTH = 2000
 MAX_RAW_CONFIG_LENGTH = 100_000
 
@@ -63,10 +67,87 @@ async def collect_virtual_hosts(
             )
         return [_unparsed_virtual_host_from_command_failure(dump_result, timeout)]
 
-    # 4. Dump'ı parse et
-    virtual_hosts = parse_nginx_dump(dump_result.stdout)
-    logger.debug("collected %d nginx virtual hosts", len(virtual_hosts))
-    return virtual_hosts
+    # 4. Dump'ı parse et (nginx -T = aktif config)
+    active_hosts = parse_nginx_dump(dump_result.stdout)
+    for virtual_host in active_hosts:
+        virtual_host.enabled = True
+
+    disabled_hosts = _collect_disabled_virtual_hosts()
+    active_paths = {
+        os.path.realpath(host.config_path)
+        for host in active_hosts
+        if host.config_path and host.parse_ok
+    }
+    merged_hosts = active_hosts + [
+        host
+        for host in disabled_hosts
+        if os.path.realpath(host.config_path) not in active_paths
+    ]
+    logger.debug(
+        "collected %d nginx virtual hosts (%d active, %d disabled)",
+        len(merged_hosts),
+        len(active_hosts),
+        len(merged_hosts) - len(active_hosts),
+    )
+    return merged_hosts
+
+
+def parse_nginx_config_file(config_path: str, content: str) -> list[VirtualHost]:
+    return parse_nginx_dump(f"# configuration file {config_path}:\n{content}")
+
+
+def _collect_disabled_virtual_hosts(
+    sites_available_dir: str = DEFAULT_SITES_AVAILABLE_DIR,
+    sites_enabled_dir: str = DEFAULT_SITES_ENABLED_DIR,
+) -> list[VirtualHost]:
+    if not os.path.isdir(sites_available_dir):
+        return []
+
+    enabled_paths = _enabled_site_realpaths(sites_enabled_dir)
+    disabled_hosts: list[VirtualHost] = []
+
+    for entry in sorted(os.listdir(sites_available_dir)):
+        if entry.startswith("."):
+            continue
+
+        config_path = os.path.join(sites_available_dir, entry)
+        if not os.path.isfile(config_path):
+            continue
+
+        if os.path.realpath(config_path) in enabled_paths:
+            continue
+
+        try:
+            content = Path(config_path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            logger.debug("could not read disabled nginx config %s: %s", config_path, exc)
+            disabled_hosts.append(
+                VirtualHost(
+                    config_path=config_path,
+                    enabled=False,
+                    parse_ok=False,
+                    parse_error=f"could not read config file: {exc}",
+                )
+            )
+            continue
+
+        for virtual_host in parse_nginx_config_file(config_path, content):
+            virtual_host.enabled = False
+            disabled_hosts.append(virtual_host)
+
+    return disabled_hosts
+
+
+def _enabled_site_realpaths(sites_enabled_dir: str) -> set[str]:
+    if not os.path.isdir(sites_enabled_dir):
+        return set()
+
+    enabled_paths: set[str] = set()
+    for entry in os.listdir(sites_enabled_dir):
+        config_path = os.path.join(sites_enabled_dir, entry)
+        if os.path.isfile(config_path) or os.path.islink(config_path):
+            enabled_paths.add(os.path.realpath(config_path))
+    return enabled_paths
 
 
 def parse_nginx_dump(dump: str) -> list[VirtualHost]:
@@ -141,6 +222,7 @@ def _merge_virtual_hosts(first: VirtualHost, second: VirtualHost) -> VirtualHost
         upstream=first.upstream or second.upstream,
         ssl_enabled=first.ssl_enabled or second.ssl_enabled,
         cert_path=first.cert_path or second.cert_path,
+        enabled=first.enabled and second.enabled,
         parse_ok=first.parse_ok and second.parse_ok,
         parse_error=first.parse_error or second.parse_error,
         raw_config=first.raw_config or second.raw_config,
@@ -208,6 +290,7 @@ def _virtual_host_from_block(
         upstream=upstream,
         ssl_enabled=ssl_enabled,
         cert_path=cert_path,
+        enabled=True,
         parse_ok=True,
     )
 

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 
 from iw_agent.cli.output import (
+    CYAN,
+    DIM,
+    _c,
+    _reset,
     emit_models,
     format_optional,
     format_state,
-    print_column_guide,
-    print_data_table,
     print_empty,
+    print_info_card,
     print_insight,
     print_report,
     print_section,
@@ -21,15 +25,7 @@ from iw_agent.modules.docker.collector import (
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     collect_containers,
 )
-from iw_agent.modules.docker.schemas import Container
-
-CONTAINER_COLUMNS = [
-    ("Name", "container name"),
-    ("Status", "running, stopped, etc."),
-    ("App image", "software package inside the container"),
-    ("Project", "docker compose project, if any"),
-    ("Published ports", "ports exposed to the host"),
-]
+from iw_agent.modules.docker.schemas import Container, PublishedPort
 
 
 async def run_containers(args: argparse.Namespace) -> None:
@@ -39,6 +35,80 @@ async def run_containers(args: argparse.Namespace) -> None:
         limit=args.limit,
     )
     emit_models(containers, json_output=args.json, plain=args.plain, render=_render_containers)
+
+
+def _containers_summary(containers: list[Container]) -> str:
+    running = sum(1 for container in containers if container.state.lower() == "running")
+    projects = {
+        container.compose_project_name
+        for container in containers
+        if container.compose_project_name
+    }
+    project_text = f"{len(projects)} compose project(s)" if projects else "no compose projects"
+    return f"Found {len(containers)} container(s), {running} running, {project_text}."
+
+
+def _project_label(container: Container) -> str:
+    if container.compose_project_name:
+        return container.compose_project_name
+    return "standalone"
+
+
+def _format_ports(ports: list[PublishedPort]) -> str:
+    if not ports:
+        return "—"
+    return ", ".join(str(port) for port in ports)
+
+
+def _container_badge(state: str) -> tuple[str, str]:
+    lowered = state.lower()
+    if lowered == "running":
+        return f"{_c(CYAN)}● RUNNING{_reset()}", "ok"
+    if lowered in {"exited", "stopped", "dead"}:
+        return f"{_c(DIM)}○ STOPPED{_reset()}", "off"
+    return f"{_c(YELLOW)}~ {state.upper()}{_reset()}", "warn"
+
+
+def _render_container_card(container: Container) -> None:
+    badge, tone = _container_badge(container.state)
+    lines = [
+        f"{_c(DIM)}project:{_reset()} {format_optional(container.compose_project_name, fallback='—')}",
+        f"{_c(DIM)}image:{_reset()} {container.image_name}",
+    ]
+
+    if container.compose_service_name:
+        lines.append(
+            f"{_c(DIM)}service:{_reset()} {container.compose_service_name}"
+        )
+
+    lines.extend(
+        [
+            f"{_c(DIM)}status:{_reset()} {format_state(container.state)}",
+            f"{_c(DIM)}ports:{_reset()} {_format_ports(container.published_ports)}",
+            f"{_c(DIM)}id:{_reset()} {container.container_id[:12]}",
+        ]
+    )
+
+    print_info_card(
+        badge=badge,
+        title=container.container_name,
+        lines=lines,
+        tone=tone,
+        strike_title=container.state.lower() in {"exited", "stopped", "dead"},
+    )
+
+
+def _group_containers(containers: list[Container]) -> list[tuple[str, list[Container]]]:
+    grouped: dict[str, list[Container]] = defaultdict(list)
+    for container in containers:
+        grouped[_project_label(container)].append(container)
+
+    def sort_key(project_name: str) -> tuple[int, str]:
+        if project_name == "standalone":
+            return (1, project_name)
+        return (0, project_name.lower())
+
+    return sorted(grouped.items(), key=lambda item: sort_key(item[0]))
 
 
 def _render_containers(containers: list[Container]) -> None:
@@ -54,24 +124,21 @@ def _render_containers(containers: list[Container]) -> None:
         )
         return
 
-    running = sum(1 for container in containers if container.state.lower() == "running")
-    print_insight(f"Found {len(containers)} containers, {running} currently running.")
+    print_insight(_containers_summary(containers))
 
-    print_section(1, "Container list", "Each row is one Docker container on this server.")
-    print_data_table(
-        CONTAINER_COLUMNS,
-        [
-            [
-                container.container_name,
-                format_state(container.state),
-                container.image_name,
-                format_optional(container.compose_project_name, fallback="—"),
-                ", ".join(str(port) for port in container.published_ports) or "—",
-            ]
-            for container in containers
-        ],
-    )
-    print_column_guide(CONTAINER_COLUMNS)
+    step = 1
+    for project_name, project_containers in _group_containers(containers):
+        if project_name == "standalone":
+            title = "Standalone containers"
+            description = "Containers not tied to a docker compose project."
+        else:
+            title = f"Project: {project_name}"
+            description = "Containers started together by docker compose."
+
+        print_section(step, title, description)
+        step += 1
+        for container in sorted(project_containers, key=lambda row: row.container_name.lower()):
+            _render_container_card(container)
 
 
 def _configure(parser: argparse.ArgumentParser) -> None:

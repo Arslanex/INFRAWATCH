@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 import psutil
@@ -16,11 +17,12 @@ PSUTIL_PROCESS_ATTRS = [
     "ppid",
     "name",
     "username",
-    "cpu_percent",
     "memory_info",
     "create_time",
     "cmdline",
 ]
+
+CPU_SAMPLE_SECONDS = 0.1
 
 
 async def collect_processes(limit: int) -> list[Process]:
@@ -29,23 +31,41 @@ async def collect_processes(limit: int) -> list[Process]:
 
 def _collect_processes(limit: int) -> list[Process]:
     # 1. Tüm process'leri oku
-    process_entries = iter_processes(PSUTIL_PROCESS_ATTRS)
+    process_entries = list(iter_processes(PSUTIL_PROCESS_ATTRS))
 
-    # 2. Process modellerine dönüştür
+    # 2. CPU sayaçlarını hazırla (ilk okuma her zaman 0.0 döner)
+    for process_entry in process_entries:
+        try:
+            process_entry.cpu_percent(interval=None)
+        except (psutil.Error, psutil.NoSuchProcess):
+            continue
+
+    if CPU_SAMPLE_SECONDS > 0:
+        time.sleep(CPU_SAMPLE_SECONDS)
+
+    # 3. Process modellerine dönüştür
     processes: list[Process] = []
     for process_entry in process_entries:
+        try:
+            process_entry.info["cpu_percent"] = process_entry.cpu_percent(interval=None)
+        except (psutil.Error, psutil.NoSuchProcess):
+            process_entry.info["cpu_percent"] = None
+
         process = _process_from_psutil(process_entry)
         if process is not None:
             processes.append(process)
 
-    # 3. CPU'ya göre sırala ve limitle
+    # 4. CPU'ya göre sırala ve limitle
     processes.sort(
-        key=lambda process: process.cpu_percent or 0.0,
-        reverse=True,
+        key=lambda process: (
+            _is_background_kernel_thread(process),
+            -(process.cpu_percent or 0.0),
+            -(process.memory_rss_bytes or 0),
+        ),
     )
     processes = processes[:limit]
 
-    # 4. Seçilen process'ler için ek bilgi oku
+    # 5. Seçilen process'ler için ek bilgi oku
     for process in processes:
         enrich_process_metadata(process)
 
@@ -55,6 +75,17 @@ def _collect_processes(limit: int) -> list[Process]:
         limit,
     )
     return processes
+
+
+def _is_background_kernel_thread(process: Process) -> bool:
+    if (process.cpu_percent or 0.0) > 0.0:
+        return False
+
+    name = process.process_name
+    if name in {"kthreadd", "ksoftirqd", "idle_inject"}:
+        return True
+
+    return name.startswith(("kworker", "rcu_", "pool_", "migration", "watchdog"))
 
 
 def _process_from_psutil(process_entry: psutil.Process) -> Process | None:

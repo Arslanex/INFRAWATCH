@@ -12,6 +12,7 @@ class VirtualHost(AgentModel):
     upstream: Optional[str] = None
     ssl_enabled: bool = False
     cert_path: Optional[str] = None
+    enabled: bool = True
     parse_ok: bool = True
     parse_error: Optional[str] = None
     raw_config: Optional[str] = None

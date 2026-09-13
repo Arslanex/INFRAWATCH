@@ -3,12 +3,16 @@ from __future__ import annotations
 import argparse
 
 from iw_agent.cli.output import (
+    CYAN,
+    DIM,
+    GREEN,
+    _c,
+    _reset,
     emit_models,
+    format_cron_schedule_hint,
     format_exit_code,
-    format_optional,
-    print_column_guide,
-    print_data_table,
     print_empty,
+    print_info_card,
     print_insight,
     print_report,
     print_section,
@@ -20,18 +24,6 @@ from iw_agent.modules.cron.state_manager import (
     DEFAULT_EXECUTION_HISTORY_TAIL,
     collect_cron_executions,
 )
-
-CRON_COLUMNS = [
-    ("User", "account that runs the job"),
-    ("Schedule", "when the job runs (cron format)"),
-    ("Command", "what the job executes"),
-]
-
-HISTORY_COLUMNS = [
-    ("When", "start time of the run"),
-    ("Result", "whether the job succeeded"),
-    ("Log file", "where output is stored"),
-]
 
 
 async def run_cron(args: argparse.Namespace) -> None:
@@ -47,6 +39,37 @@ async def run_cron_history(args: argparse.Namespace) -> None:
     emit_models(executions, json_output=args.json, plain=args.plain, render=_render_cron_history)
 
 
+def _cron_summary(jobs: list[CronJob]) -> str:
+    owners = {job.owner for job in jobs}
+    return f"Found {len(jobs)} scheduled job(s) for {len(owners)} user account(s)."
+
+
+def _cron_history_summary(executions: list[CronJobExecution]) -> str:
+    failed = sum(1 for execution in executions if execution.exit_code != 0)
+    ok = len(executions) - failed
+    return f"Showing {len(executions)} recent run(s): {ok} succeeded, {failed} failed."
+
+
+def _render_cron_job_card(job: CronJob) -> None:
+    schedule_hint = format_cron_schedule_hint(job.cron_expression)
+    badge = f"{_c(GREEN)}● SCHEDULED{_reset()}"
+
+    lines = [
+        f"{_c(CYAN)}⏰{_reset()} {job.cron_expression}  {_c(DIM)}({schedule_hint}){_reset()}",
+        f"{_c(DIM)}runs as:{_reset()} {job.owner}",
+        job.command if len(job.command) <= 72 else f"{job.command[:69]}...",
+    ]
+    if job.output_log_path:
+        lines.append(f"{_c(DIM)}log:{_reset()} {job.output_log_path}")
+
+    print_info_card(
+        badge=badge,
+        title=job.command.split()[0] if job.command else job.owner,
+        lines=lines,
+        tone="ok",
+    )
+
+
 def _render_cron(jobs: list[CronJob]) -> None:
     print_report(
         "Scheduled tasks (cron)",
@@ -60,21 +83,28 @@ def _render_cron(jobs: list[CronJob]) -> None:
         )
         return
 
-    print_insight(f"Found {len(jobs)} scheduled job(s).")
+    print_insight(_cron_summary(jobs))
+    print_section(1, "Scheduled jobs", "Each card is one automatic task on this server.")
+    for job in jobs:
+        _render_cron_job_card(job)
 
-    print_section(1, "Job list", "Review what runs automatically and when.")
-    print_data_table(
-        CRON_COLUMNS,
-        [
-            [
-                job.owner,
-                job.cron_expression,
-                job.command[:70],
-            ]
-            for job in jobs
-        ],
+
+def _render_history_card(execution: CronJobExecution) -> None:
+    ok = execution.exit_code == 0
+    badge = format_exit_code(execution.exit_code)
+    tone = "ok" if ok else "bad"
+
+    lines = [
+        f"{_c(DIM)}when:{_reset()} {execution.started_at.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"{_c(DIM)}log:{_reset()} {execution.job_log_path}",
+    ]
+
+    print_info_card(
+        badge=badge,
+        title=execution.job_log_path.rsplit("/", 1)[-1],
+        lines=lines,
+        tone=tone,
     )
-    print_column_guide(CRON_COLUMNS)
 
 
 def _render_cron_history(executions: list[CronJobExecution]) -> None:
@@ -90,21 +120,10 @@ def _render_cron_history(executions: list[CronJobExecution]) -> None:
         )
         return
 
-    print_insight(f"Showing {len(executions)} recent run record(s).")
-
+    print_insight(_cron_history_summary(executions))
     print_section(1, "Recent runs", "Exit code 0 means the job finished successfully.")
-    print_data_table(
-        HISTORY_COLUMNS,
-        [
-            [
-                execution.started_at.strftime("%Y-%m-%d %H:%M UTC"),
-                format_exit_code(execution.exit_code),
-                execution.job_log_path,
-            ]
-            for execution in executions
-        ],
-    )
-    print_column_guide(HISTORY_COLUMNS)
+    for execution in executions:
+        _render_history_card(execution)
 
 
 def _configure_history(parser: argparse.ArgumentParser) -> None:
