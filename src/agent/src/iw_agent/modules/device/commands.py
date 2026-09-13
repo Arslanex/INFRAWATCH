@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from iw_agent.cli.output import (
+    DIM,
     _c,
     _reset,
     emit_models,

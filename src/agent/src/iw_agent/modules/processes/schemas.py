@@ -9,6 +9,7 @@ class Process(AgentModel):
     parent_pid: Optional[int] = None
     process_name: str
     owner: Optional[str] = None
+    status: Optional[str] = None
     cpu_percent: Optional[float] = None
     memory_rss_bytes: Optional[int] = None
     started_at: Optional[datetime] = None

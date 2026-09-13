@@ -17,6 +17,7 @@ PSUTIL_PROCESS_ATTRS = [
     "ppid",
     "name",
     "username",
+    "status",
     "memory_info",
     "create_time",
     "cmdline",
@@ -106,6 +107,7 @@ def _process_from_psutil(process_entry: psutil.Process) -> Process | None:
         parent_pid=process_info.get("ppid"),
         process_name=process_info.get("name") or "",
         owner=process_info.get("username"),
+        status=process_info.get("status"),
         cpu_percent=process_info.get("cpu_percent"),
         memory_rss_bytes=getattr(memory_info, "rss", None),
         started_at=(

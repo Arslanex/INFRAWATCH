@@ -6,7 +6,6 @@ from iw_agent.cli.output import (
     DIM,
     _c,
     _reset,
-    clear_screen,
     emit_json,
     emit_models,
     format_field,
@@ -65,7 +64,6 @@ async def run_nginx_config(args: argparse.Namespace) -> None:
         )
         return
 
-    clear_screen()
     if dump_result is None:
         print_report(
             "Nginx raw config",

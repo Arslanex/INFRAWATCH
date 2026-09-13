@@ -41,6 +41,7 @@ INFO_BOX_COLOR = MAGENTA
 _BOX_WIDTH = 44
 _TONE_BORDERS = {
     "ok": GREEN,
+    "work": BLUE,
     "warn": YELLOW,
     "bad": RED,
     "off": DIM,
@@ -52,7 +53,15 @@ def clear_screen() -> None:
     if _plain_mode:
         print()
         return
-    print("\033[2J\033[H", end="")
+    if sys.stdout.isatty():
+        print("\033[2J\033[H", end="", flush=True)
+        return
+    print()
+
+
+def prepare_command_view(*, plain: bool = False) -> None:
+    configure_output(plain=plain)
+    clear_screen()
 
 
 def _visible_length(text: str) -> int:
@@ -74,43 +83,55 @@ def _color_cell(text: str, color: str) -> str:
 
 def print_banner() -> None:
     print()
-    print(f"{_c(BOLD)}{_c(CYAN)}InfraWatch{_reset()} {_c(DIM)}— server inspection tool{_reset()}")
-    print(f"{_c(DIM)}Pick a command, e.g.  iw device  ·  iw ports  ·  iw containers{_reset()}")
-    print()
+    _print_box_top(INFO_BOX_COLOR, f"{_c(BOLD)}InfraWatch{_reset()}")
+    _print_box_line(INFO_BOX_COLOR, format_field("About", "server inspection tool", label_width=8))
+    _print_box_line(
+        INFO_BOX_COLOR,
+        format_field("Try", "iw device · iw ports · iw containers", label_width=8),
+    )
+    _print_box_bottom(INFO_BOX_COLOR)
 
 
 def print_report(title: str, subtitle: str) -> None:
-    line = "═" * 52
     print()
-    print(f"{_c(CYAN)}{line}{_reset()}")
-    print(f"{_c(BOLD)}  {title}{_reset()}")
-    print(f"{_c(DIM)}  {subtitle}{_reset()}")
-    print(f"{_c(CYAN)}{line}{_reset()}")
-    print()
+    _print_box_top(INFO_BOX_COLOR, f"{_c(BOLD)}{title}{_reset()}")
+    _print_box_line(INFO_BOX_COLOR, format_field("About", subtitle, label_width=8))
+    _print_box_bottom(INFO_BOX_COLOR)
 
 
 def print_insight(text: str) -> None:
-    print(f"{_c(BOLD)}{_c(BLUE)}Summary{_reset()}  {text}")
     print()
+    _print_box_top(INFO_BOX_COLOR, format_label("Summary"))
+    _print_box_line(INFO_BOX_COLOR, text)
+    _print_box_bottom(INFO_BOX_COLOR)
 
 
 def print_section(step: int, title: str, description: str) -> None:
-    marker = f"{step}." if step > 0 else "•"
-    print(f"{_c(BOLD)}{marker} {title}{_reset()}")
-    print(f"   {_c(DIM)}{description}{_reset()}")
-    print()
+    del step
+    print_group_heading(title, description)
 
 
 def print_spacer() -> None:
     print()
 
 
-def format_field(label: str, value: str) -> str:
-    return f"{_c(BOLD)}{label}{_reset()}: {value}"
+def format_label(label: str) -> str:
+    if _plain_mode:
+        return f"{label}:"
+    return f"{_c(BOLD)}{label}:{_reset()}"
 
 
-def format_fields(rows: list[tuple[str, str]]) -> list[str]:
-    return [format_field(label, value) for label, value in rows]
+def format_field(label: str, value: str, *, label_width: int = 10) -> str:
+    gap = max(1, label_width - len(label))
+    return f"{format_label(label)}{' ' * gap}{value}"
+
+
+def format_fields(
+    rows: list[tuple[str, str]],
+    *,
+    label_width: int = 10,
+) -> list[str]:
+    return [format_field(label, value, label_width=label_width) for label, value in rows]
 
 
 def status_badge(text: str, tone: str) -> str:
@@ -140,9 +161,9 @@ def print_info_box(
     lines: list[str],
     hint: str | None = None,
 ) -> None:
-    header = f"{_c(BOLD)}{title}{_reset()}"
+    header = format_label(title)
     if hint:
-        header = f"{header}: {_c(DIM)}{hint}{_reset()}"
+        header = f"{header} {_c(DIM)}{hint}{_reset()}"
     _print_box_top(INFO_BOX_COLOR, header)
     for line in lines:
         _print_box_line(INFO_BOX_COLOR, line)
@@ -168,10 +189,10 @@ def print_status_box(
 
 def print_group_heading(title: str, hint: str | None = None) -> None:
     print()
-    text = f"{_c(BOLD)}{title}{_reset()}"
     if hint:
-        text = f"{text}: {_c(DIM)}{hint}{_reset()}"
-    print(f"   {text}")
+        print(f"   {format_label(title)} {_c(DIM)}{hint}{_reset()}")
+    else:
+        print(f"   {format_label(title.rstrip(':'))}")
     print()
 
 
@@ -212,10 +233,15 @@ def print_labeled_block(label: str, lines: list[str], *, label_width: int | None
 
 
 def print_empty(title: str, reason: str, hint: str) -> None:
-    print(f"   {_c(YELLOW)}Nothing to show — {title}{_reset()}")
-    print(f"   {_c(DIM)}{reason}{_reset()}")
-    print(f"   {_c(DIM)}Tip: {hint}{_reset()}")
-    print()
+    print_status_box(
+        badge=status_badge("EMPTY", "warn"),
+        title=title,
+        lines=[
+            format_field("Reason", reason, label_width=8),
+            format_field("Tip", hint, label_width=8),
+        ],
+        tone="warn",
+    )
 
 
 def print_data_table(
@@ -426,7 +452,7 @@ def format_memory_meter_line(
     width: int = 22,
 ) -> str:
     if used is None or total is None or total <= 0:
-        return "RAM  [----------------------] unknown"
+        return f"{format_label('RAM')}     [----------------------] unknown"
     return format_memory_meter(used, total, width=width)
 
 
@@ -439,7 +465,7 @@ def format_load_meter_line(
     width: int = 22,
 ) -> str:
     if load_1 is None:
-        return "Load [----------------------] unknown"
+        return f"{format_label('Load')}    [----------------------] unknown"
 
     load_5_text = f"{load_5:.2f}" if load_5 is not None else "?"
     load_15_text = f"{load_15:.2f}" if load_15 is not None else "?"
@@ -607,12 +633,44 @@ def cert_expiry_details(not_after: datetime | None) -> tuple[str, str, str, floa
     )
 
 
-def process_load_details(cpu_percent: float | None) -> tuple[str, str]:
+def process_load_details(
+    cpu_percent: float | None,
+    *,
+    process_status: str | None = None,
+) -> tuple[str, str]:
+    """Map process state to badge + box tone.
+
+    Lifecycle (psutil status):
+      ZOMBIE / DEAD  -> red     broken process
+      STOPPED        -> dim     not running
+      WAITING        -> blue    sleeping or blocked on I/O
+
+    CPU while runnable:
+      IDLE           -> green   alive, almost no CPU
+      WORKING        -> blue    normal active use
+      HOT            -> yellow  heavy load
+      BUSY           -> red     maxed out
+    """
+    status = (process_status or "running").lower()
     cpu = cpu_percent or 0.0
-    if cpu >= 50:
+
+    if status == "zombie":
+        return status_badge("ZOMBIE", "bad"), "bad"
+    if status == "dead":
+        return status_badge("DEAD", "bad"), "bad"
+    if status in {"stopped", "tracing-stop"}:
+        return status_badge("STOPPED", "off"), "off"
+    if status in {"sleeping", "disk-sleep", "waking", "locked"}:
+        return status_badge("WAITING", "work"), "work"
+    if status == "idle":
+        return status_badge("IDLE", "ok"), "ok"
+
+    if cpu >= 75:
         return status_badge("BUSY", "bad"), "bad"
-    if cpu >= 10:
-        return status_badge("ACTIVE", "warn"), "warn"
+    if cpu >= 40:
+        return status_badge("HOT", "warn"), "warn"
+    if cpu >= 3:
+        return status_badge("WORKING", "work"), "work"
     return status_badge("IDLE", "ok"), "ok"
 
 
@@ -621,12 +679,13 @@ def format_meter(
     percent: float,
     *,
     width: int = 22,
-    label_width: int = 4,
+    label_width: int = 8,
 ) -> str:
     clamped = min(100.0, max(0.0, percent))
     bar = format_horizontal_bar(clamped, width=width)
     display = label if len(label) <= label_width else label[:label_width]
-    return f"{display:<{label_width}} [{bar}] {clamped:4.1f}%"
+    gap = max(1, label_width - len(display))
+    return f"{format_label(display.rstrip(':'))}{' ' * gap}[{bar}] {clamped:4.1f}%"
 
 
 def format_memory_meter(
@@ -637,12 +696,12 @@ def format_memory_meter(
 ) -> str:
     if memory_bytes is None or system_total_bytes <= 0:
         bar = format_horizontal_bar(0.0, width=width)
-        return f"RAM  [{bar}] unknown"
+        return f"{format_label('RAM')}     [{bar}] unknown"
 
     percent = min(100.0, (memory_bytes / system_total_bytes) * 100)
     bar = format_horizontal_bar(percent, width=width)
     return (
-        f"RAM  [{bar}] {format_bytes(memory_bytes)}"
+        f"{format_label('RAM')}     [{bar}] {format_bytes(memory_bytes)}"
         f"  {_c(DIM)}({percent:.1f}% of server RAM){_reset()}"
     )
 

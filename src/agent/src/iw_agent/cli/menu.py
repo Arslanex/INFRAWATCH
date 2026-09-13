@@ -29,7 +29,6 @@ async def _interactive_menu() -> None:
             return
 
         selected = specs[choice - 1]
-        print(f"\n> iw {selected.name}\n")
         await selected.handler(_default_args())
 
 

@@ -40,22 +40,17 @@ UI_BOX_BORDER=""
 ui_header() {
     local title="$1"
     local subtitle="${2:-}"
-    printf '\n'
-    if [[ "$UI_PLAIN" -eq 0 ]]; then
-        printf '%s%s%s\n' "$UI_M" "$(printf '═%.0s' {1..52})" "$UI_N"
-    fi
-    printf '  %s%s%s\n' "$UI_B" "$title" "$UI_N"
+    ui_box_open info "${UI_B}${title}${UI_N}"
     if [[ -n "$subtitle" ]]; then
-        printf '  %s%s%s\n' "$UI_D" "$subtitle" "$UI_N"
+        ui_box_field "About" "$subtitle"
     fi
-    if [[ "$UI_PLAIN" -eq 0 ]]; then
-        printf '%s%s%s\n' "$UI_M" "$(printf '═%.0s' {1..52})" "$UI_N"
-    fi
-    printf '\n'
+    ui_box_close
 }
 
 ui_summary() {
-    printf '  %sSummary%s  %s\n\n' "$UI_B" "$UI_N" "$1"
+    ui_box_open info "${UI_B}Summary:${UI_N}"
+    ui_box_line "$1"
+    ui_box_close
 }
 
 ui_box_open() {
@@ -75,7 +70,7 @@ ui_box_line() {
 }
 
 ui_box_field() {
-    ui_box_line "${UI_B}${1}${UI_N}: ${2}"
+    ui_box_line "${UI_B}${1}:${UI_N} ${2}"
 }
 
 ui_box_close() {
