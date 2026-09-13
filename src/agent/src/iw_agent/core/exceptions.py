@@ -84,7 +84,7 @@ class DockerTimeoutError(DockerError):
 
 
 class NginxError(AgentError):
-    service = "ngnix"
+    service = "nginx"
     code = "NGINX_ERROR"
 
 
@@ -131,6 +131,11 @@ class CronCrontabUnreadableError(CronError):
 
 class CronExecutionLogUnreadableError(CronError):
     code = "CRON_EXECUTION_LOG_UNREADABLE"
+
+
+class ProjectError(AgentError):
+    service = "project"
+    code = "PROJECT_ERROR"
 
 
 class ExecutorError(AgentError):

@@ -7,11 +7,12 @@ import logging.handlers
 import queue
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+
+from iw_agent.core.paths import error_log_path, state_dir
 
 LOGGER_NAME = "iw_agent"
-LOG_DIR = Path("logs")
-ERROR_LOG_FILE = LOG_DIR / "error.log"
+LOG_DIR = state_dir()
+ERROR_LOG_FILE = error_log_path()
 MAX_BYTES = 10 * 1024 * 1024
 BACKUP_COUNT = 5
 

@@ -126,19 +126,3 @@ class LocationBlock(AgentModel):
         return "empty"
 
 
-class SiteConfigSections(AgentModel):
-    config_path: str
-    primary_domain: str
-    server_names: list[str] = Field(default_factory=list)
-    listen_endpoints: list[ListenEndpoint] = Field(default_factory=list)
-    http_port: int = 80
-    http_listen_address: Optional[str] = None
-    listen_443_ssl: bool = False
-    locations: list[LocationBlock] = Field(default_factory=list)
-    http_to_https: bool = False
-    www_to_apex: bool = False
-    proxy_pass: Optional[str] = None
-    document_root: Optional[str] = None
-    index_files: Optional[str] = None
-    try_files: Optional[str] = None
-    security_preset: SecurityPreset = SecurityPreset.NONE

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
+from iw_agent.core.paths import audit_log_path
 from iw_agent.core.schemas import AgentModel
 
 
@@ -27,13 +28,14 @@ class ActionSpec:
 class ExecutorOptions:
     dry_run: bool = False
     skip_confirm: bool = False
-    audit_log_path: str = "logs/actions.log"
+    # resolved per instance so an env override or running as root is honoured
+    audit_log_path: str = field(default_factory=lambda: str(audit_log_path()))
 
 
 class ActionRequest(AgentModel):
     module: str
     action_id: str
-    target_id: str | None = None
+    target_id: Optional[str] = None
     params: dict[str, Any] = {}
 
 

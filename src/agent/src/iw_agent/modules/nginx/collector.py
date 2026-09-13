@@ -12,17 +12,12 @@ from iw_agent.core.exceptions import (
     NginxTimeoutError,
 )
 from iw_agent.core.logger import logger
-from iw_agent.core._thread import read
-from iw_agent.modules.ngnix.schemas import (
-    MANAGED_SECURITY_HEADER_NAMES,
+from iw_agent.modules.nginx.schemas import (
     ListenEndpoint,
     LocationBlock,
-    SecurityPreset,
-    SiteConfigSections,
     SiteProfile,
     SslStatus,
     VirtualHost,
-    security_headers_for_preset,
 )
 from iw_agent.modules.ssl.collector import DEFAULT_CERTBOT_LIVE_DIR, collect_certificates
 from iw_agent.modules.ssl.schemas import Certificate
@@ -334,9 +329,9 @@ def _listen_port_number(listen_value: str) -> int | None:
 
 
 EXPIRING_DAYS = 30
-_REDIRECT_RETURN = re.compile(r"^\s*return\s+301\s+")
+_REDIRECT_RETURN = re.compile(r"^\s*return\s+301\s+", re.MULTILINE)
 _SERVER_NAME_LINE = re.compile(r"^\s*server_name\s+(?P<names>.+);")
-_LISTEN_443 = re.compile(r"^\s*listen\s+.*443")
+_LISTEN_443 = re.compile(r"^\s*listen\s+.*443", re.MULTILINE)
 _ADD_HEADER_LINE = re.compile(
     r'^\s*add_header\s+(?P<name>[^;\s]+)\s+"(?P<value>[^"]*)"(?:\s+always)?\s*;\s*$',
 )
@@ -399,30 +394,6 @@ def _listen_endpoints_from_block(block_lines: list[str]) -> list[ListenEndpoint]
     return endpoints
 
 
-def _domain_port_summary(
-    endpoints: list[ListenEndpoint],
-) -> tuple[int, Optional[str], bool]:
-    http_port = 80
-    http_listen_address: str | None = None
-    listen_443_ssl = False
-
-    for endpoint in endpoints:
-        if endpoint.ssl and endpoint.port == 443:
-            listen_443_ssl = True
-
-    for endpoint in endpoints:
-        if endpoint.ssl:
-            continue
-        if endpoint.address == "::":
-            http_port = endpoint.port
-            continue
-        http_port = endpoint.port
-        http_listen_address = endpoint.address
-        break
-
-    return http_port, http_listen_address, listen_443_ssl
-
-
 def _extract_server_blocks(content: str) -> list[list[str]]:
     lines = content.splitlines()
     blocks: list[list[str]] = []
@@ -474,27 +445,6 @@ def _is_www_redirect_block(block_lines: list[str], domain: str) -> bool:
     return bool(_REDIRECT_RETURN.search(block_text)) and domain in block_text
 
 
-def _headers_in_block(block_lines: list[str]) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for line in block_lines:
-        match = _ADD_HEADER_LINE.match(line)
-        if match and match.group("name") in MANAGED_SECURITY_HEADER_NAMES:
-            headers[match.group("name")] = match.group("value")
-    return headers
-
-
-def _main_server_block_lines(content: str, primary_domain: str) -> list[str] | None:
-    for block_lines in _extract_server_blocks(content):
-        if _is_http_redirect_block(block_lines, primary_domain):
-            continue
-        if _is_www_redirect_block(block_lines, primary_domain):
-            continue
-        names = _server_names_in_block(block_lines)
-        if primary_domain in names:
-            return block_lines
-    return None
-
-
 def _location_block_from_lines(path: str, block_lines: list[str]) -> LocationBlock:
     proxy_pass: str | None = None
     root: str | None = None
@@ -543,143 +493,6 @@ def _prefix_locations_from_block(block_lines: list[str]) -> list[LocationBlock]:
                 break
         locations.append(_location_block_from_lines(path, loc_lines))
     return locations
-
-
-def _find_location_root_in_block_lines(block_lines: list[str]) -> tuple[int, int] | None:
-    index = 0
-    while index < len(block_lines):
-        if _LOCATION_ROOT_START.match(block_lines[index]):
-            start = index
-            depth = 0
-            while index < len(block_lines):
-                depth += block_lines[index].count("{") - block_lines[index].count("}")
-                index += 1
-                if depth <= 0:
-                    return start, index - 1
-            return None
-        index += 1
-    return None
-
-
-def _static_values_from_server_block(
-    block_lines: list[str],
-) -> tuple[str | None, str | None, str | None]:
-    document_root: str | None = None
-    index_files: str | None = None
-    try_files: str | None = None
-
-    location = _find_location_root_in_block_lines(block_lines)
-    static_lines = block_lines
-    if location is not None:
-        loc_start, loc_end = location
-        loc_lines = block_lines[loc_start : loc_end + 1]
-        if "proxy_pass" not in "\n".join(loc_lines):
-            static_lines = loc_lines
-
-    for line in static_lines:
-        index_match = _INDEX_LINE.match(line)
-        if index_match and index_files is None:
-            index_files = index_match.group("value").strip().strip('"')
-        try_match = _TRY_FILES_LINE.match(line)
-        if try_match and try_files is None:
-            try_files = try_match.group("value").strip().strip('"')
-
-    if index_files is None or try_files is None:
-        for line in block_lines:
-            if index_files is None:
-                index_match = _INDEX_LINE.match(line)
-                if index_match:
-                    index_files = index_match.group("value").strip().strip('"')
-            if try_files is None:
-                try_match = _TRY_FILES_LINE.match(line)
-                if try_match:
-                    try_files = try_match.group("value").strip().strip('"')
-
-    for line in block_lines:
-        root_match = _ROOT_LINE.match(line)
-        if root_match:
-            document_root = root_match.group("value").strip().strip('"')
-            break
-
-    return document_root, index_files, try_files
-
-
-def _detect_security_preset(headers: dict[str, str]) -> SecurityPreset:
-    for preset in (SecurityPreset.STRICT, SecurityPreset.BASIC):
-        expected = {
-            name: value for name, value in security_headers_for_preset(preset)
-        }
-        if all(headers.get(name) == value for name, value in expected.items()):
-            return preset
-    return SecurityPreset.NONE
-
-
-def _load_site_config_sections_sync(config_path: str, primary_domain: str) -> SiteConfigSections:
-    path = Path(config_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"nginx config not found: {config_path}")
-
-    content = path.read_text(encoding="utf-8", errors="replace")
-    http_redirect = False
-    www_redirect = False
-    proxy_pass: str | None = None
-    document_root: str | None = None
-    index_files: str | None = None
-    try_files: str | None = None
-    security_preset = SecurityPreset.NONE
-    server_names: list[str] = []
-    listen_endpoints: list[ListenEndpoint] = []
-    http_port = 80
-    http_listen_address: str | None = None
-    listen_443_ssl = False
-    locations: list[LocationBlock] = []
-
-    main_block = _main_server_block_lines(content, primary_domain)
-    if main_block is not None:
-        security_preset = _detect_security_preset(_headers_in_block(main_block))
-        document_root, index_files, try_files = _static_values_from_server_block(main_block)
-        server_names = _server_names_in_block(main_block)
-        listen_endpoints = _listen_endpoints_from_block(main_block)
-        http_port, http_listen_address, listen_443_ssl = _domain_port_summary(listen_endpoints)
-        locations = _prefix_locations_from_block(main_block)
-
-    for block_lines in _extract_server_blocks(content):
-        if _is_http_redirect_block(block_lines, primary_domain):
-            http_redirect = True
-            continue
-        if _is_www_redirect_block(block_lines, primary_domain):
-            www_redirect = True
-            continue
-
-        names = _server_names_in_block(block_lines)
-        if primary_domain not in names:
-            continue
-
-        for directive_name, directive_value in _directives_from_text("\n".join(block_lines)):
-            if directive_name == "proxy_pass" and proxy_pass is None:
-                proxy_pass = directive_value.strip('"').strip()
-
-    return SiteConfigSections(
-        config_path=config_path,
-        primary_domain=primary_domain,
-        server_names=server_names or ([primary_domain] if primary_domain else []),
-        listen_endpoints=listen_endpoints,
-        http_port=http_port,
-        http_listen_address=http_listen_address,
-        listen_443_ssl=listen_443_ssl,
-        locations=locations,
-        http_to_https=http_redirect,
-        www_to_apex=www_redirect,
-        proxy_pass=proxy_pass,
-        document_root=document_root,
-        index_files=index_files,
-        try_files=try_files,
-        security_preset=security_preset,
-    )
-
-
-async def load_site_config_sections(config_path: str, primary_domain: str) -> SiteConfigSections:
-    return await read(_load_site_config_sections_sync, config_path, primary_domain)
 
 
 async def precheck_certificate_domain(domain: str) -> tuple[list[str], list[str]]:

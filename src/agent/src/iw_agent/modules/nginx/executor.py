@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +9,7 @@ from iw_agent.core._thread import read
 from iw_agent.core.action_service import get_action_service
 from iw_agent.core.actions import ActionKind, ActionRequest, ActionResult, ActionSpec, ExecutorOptions
 from iw_agent.core.commands import is_command_available, run_command
-from iw_agent.modules.ngnix.collector import (
+from iw_agent.modules.nginx.collector import (
     DEFAULT_NGINX_BINARY,
     DEFAULT_NGINX_TIMEOUT_SECONDS,
     DEFAULT_SITES_AVAILABLE_DIR,
@@ -24,7 +23,7 @@ from iw_agent.modules.ngnix.collector import (
     parse_listen_directive,
     precheck_certificate_domain,
 )
-from iw_agent.modules.ngnix.schemas import (
+from iw_agent.modules.nginx.schemas import (
     DEFAULT_INDEX_FILES,
     ListenEndpoint,
     MANAGED_SECURITY_HEADER_NAMES,
@@ -34,9 +33,27 @@ from iw_agent.modules.ngnix.schemas import (
     VirtualHost,
     security_headers_for_preset,
 )
+from iw_agent.modules.nginx import confparse, safe_write
+from iw_agent.modules.nginx.confparse import NginxParseError
+from iw_agent.modules.nginx.safe_write import ConfigConflictError
+from iw_agent.modules.nginx.validation import (
+    DEFAULT_ALLOWED_CONFIG_ROOTS,
+    NginxValidationError,
+    validate_binary,
+    validate_config_path,
+    validate_directive_value,
+    validate_directory,
+    validate_domain,
+    validate_email,
+    validate_location_path,
+    validate_port,
+    validate_proxy_pass,
+    validate_server_names,
+    validate_timeout,
+)
 from iw_agent.modules.ssl.executor import CertbotRequest, obtain_certificate, renew_certificate
 
-MODULE = "ngnix"
+MODULE = "nginx"
 
 NGINX_SITE_ACTIONS: tuple[ActionSpec, ...] = (
     ActionSpec(
@@ -138,6 +155,13 @@ NGINX_SITE_ACTIONS: tuple[ActionSpec, ...] = (
         description="Manage server_name and listen directives",
     ),
     ActionSpec(
+        id="write_site_config",
+        label="Write site config",
+        kind=ActionKind.WRITE,
+        requires_root=True,
+        description="Write a whole site config, test it, and roll back if nginx rejects it",
+    ),
+    ActionSpec(
         id="apply_location_settings",
         label="Update location blocks",
         kind=ActionKind.WRITE,
@@ -155,6 +179,7 @@ HIDDEN_ACTION_IDS = frozenset(
         "create_site",
         "apply_domain_port_settings",
         "apply_location_settings",
+        "write_site_config",
     },
 )
 
@@ -294,13 +319,12 @@ def _apply_ssl_sync(
             message=f"dry-run: would update {config_path} ({detail})",
         )
 
-    backup_path = f"{config_path}.iw.bak"
-    shutil.copy2(config_path, backup_path)
-    path.write_text(updated, encoding="utf-8")
+    rollback_path = safe_write.take_backups(path)
+    safe_write.atomic_write(path, updated)
     return DeployResult(
         changed=True,
         message=f"updated {config_path} ({detail})",
-        backup_path=backup_path,
+        backup_path=str(rollback_path),
     )
 
 
@@ -391,14 +415,12 @@ def _apply_redirect_sync(
             message=f"dry-run: would update {config_path} ({detail})",
         )
 
-    backup_path = f"{config_path}.iw.bak"
-    if not Path(backup_path).exists():
-        shutil.copy2(config_path, backup_path)
-    path.write_text(updated, encoding="utf-8")
+    rollback_path = safe_write.take_backups(path)
+    safe_write.atomic_write(path, updated)
     return DeployResult(
         changed=True,
         message=f"updated {config_path} ({detail})",
-        backup_path=backup_path,
+        backup_path=str(rollback_path),
     )
 
 
@@ -576,6 +598,10 @@ def _find_main_server_block(lines: list[str], domain: str) -> tuple[int, int] | 
     return None
 
 
+# marks a line for deletion without disturbing the blank lines around it
+_DROP_LINE = "\x00iw-drop"
+
+
 def patch_backend_content(
     content: str,
     domain: str,
@@ -601,22 +627,26 @@ def patch_backend_content(
         proxy_match = PROXY_PASS_LINE.match(line)
         if proxy_match and (proxy_pass is not None or remove_proxy):
             if remove_proxy:
-                lines[index] = ""
+                lines[index] = _DROP_LINE
+                changed = True
             else:
-                lines[index] = f"{proxy_match.group(1)}proxy_pass {proxy_pass};"
-            changed = True
+                replacement = f"{proxy_match.group(1)}proxy_pass {proxy_pass};"
+                if replacement != line:
+                    lines[index] = replacement
+                    changed = True
             proxy_replaced = True
             continue
         root_match = ROOT_LINE.match(line)
         if root_match and (document_root is not None or remove_root):
             if remove_root:
-                lines[index] = ""
+                lines[index] = _DROP_LINE
+                changed = True
             else:
-                lines[index] = f"{root_match.group(1)}root {document_root};"
-            changed = True
+                replacement = f"{root_match.group(1)}root {document_root};"
+                if replacement != line:
+                    lines[index] = replacement
+                    changed = True
             root_replaced = True
-
-    lines = [line for line in lines if line != ""]
 
     if proxy_pass is not None and not remove_proxy and not proxy_replaced:
         insert_at = end
@@ -635,6 +665,8 @@ def patch_backend_content(
 
     if not changed:
         return content, False, "no backend changes needed"
+
+    lines = [line for line in lines if line != _DROP_LINE]
 
     trailing_newline = "\n" if content.endswith("\n") else ""
     detail_parts = []
@@ -665,14 +697,12 @@ def _apply_content_patch_sync(
     if dry_run:
         return DeployResult(changed=True, message=f"dry-run: would update {config_path} ({message})")
 
-    backup_path = f"{config_path}.iw.bak"
-    if not Path(backup_path).exists():
-        shutil.copy2(config_path, backup_path)
-    path.write_text(updated, encoding="utf-8")
+    rollback_path = safe_write.take_backups(path)
+    safe_write.atomic_write(path, updated)
     return DeployResult(
         changed=True,
         message=f"updated {config_path} ({message})",
-        backup_path=backup_path,
+        backup_path=str(rollback_path),
     )
 
 
@@ -1567,6 +1597,11 @@ class NginxExecutorConfig:
 
     @classmethod
     def from_params(cls, params: dict) -> NginxExecutorConfig:
+        """Build a config from request params, validating every override.
+
+        These values become argv entries and filesystem targets for actions
+        that run as root, so a caller must not be able to point them anywhere.
+        """
         values = {
             key: params[key]
             for key in (
@@ -1581,7 +1616,53 @@ class NginxExecutorConfig:
             )
             if key in params
         }
+
+        for key in ("nginx_binary", "certbot_binary"):
+            if key in values:
+                values[key] = validate_binary(values[key], name=key)
+        for key in ("sites_available_dir", "sites_enabled_dir", "certbot_live_dir", "webroot"):
+            if key in values:
+                values[key] = validate_directory(values[key], name=key)
+        for key in ("timeout", "certbot_timeout"):
+            if key in values:
+                values[key] = validate_timeout(values[key], name=key)
+
         return cls(**values)
+
+
+def _validate_request_params(request: ActionRequest) -> None:
+    """Validate the free-text params before they reach a config or an argv.
+
+    Unknown keys are ignored; each handler reads only what it needs. What is
+    checked here is everything that can end up inside a server block or as a
+    filesystem target.
+    """
+    params = request.params
+
+    if params.get("domain") is not None:
+        domain = validate_domain(params["domain"])
+        if params.get("server_names") is not None:
+            validate_server_names(params["server_names"], domain=domain)
+
+    if params.get("email") is not None:
+        validate_email(params["email"])
+
+    if params.get("proxy_pass") is not None:
+        validate_proxy_pass(params["proxy_pass"])
+
+    if params.get("location_path") is not None:
+        validate_location_path(params["location_path"])
+
+    for key in ("document_root", "index_files", "try_files"):
+        if params.get(key) is not None:
+            validate_directive_value(params[key], name=key)
+
+    for key in ("http_port", "https_port", "port"):
+        if params.get(key) is not None:
+            validate_port(params[key], name=key)
+
+    if request.target_id and request.action_id == "create_site":
+        validate_domain(request.target_id, name="target_id")
 
 
 class NginxExecutor:
@@ -1599,9 +1680,16 @@ class NginxExecutor:
         if handler is None:
             return _fail(request, f"handler missing for {request.action_id}", options)
 
-        config = NginxExecutorConfig.from_params(request.params)
+        try:
+            config = NginxExecutorConfig.from_params(request.params)
+            _validate_request_params(request)
+        except NginxValidationError as exc:
+            return _fail(request, str(exc), options)
+
         virtual_host = await _resolve_virtual_host(request, config)
         if virtual_host is None and request.action_id not in {
+            # these do not read the virtual host at all
+            "test_config",
             "reload",
             "attach_ssl",
             "apply_redirect_settings",
@@ -1611,6 +1699,7 @@ class NginxExecutor:
             "create_site",
             "apply_domain_port_settings",
             "apply_location_settings",
+            "write_site_config",
         }:
             return _fail(
                 request,
@@ -1621,13 +1710,30 @@ class NginxExecutor:
         return await handler(request, options, virtual_host=virtual_host, config=config)
 
 
+def _allowed_config_roots(config: NginxExecutorConfig) -> tuple[str, ...]:
+    """Where an nginx config may live: the standard roots plus configured dirs."""
+    return DEFAULT_ALLOWED_CONFIG_ROOTS + (
+        config.sites_available_dir,
+        config.sites_enabled_dir,
+    )
+
+
 async def _resolve_virtual_host(
     request: ActionRequest,
     config: NginxExecutorConfig,
 ) -> VirtualHost | None:
     embedded = request.params.get("virtual_host")
     if embedded is not None:
-        return VirtualHost.model_validate(embedded)
+        # callers may pass a host they already collected to save an nginx -T,
+        # but its config_path steers root-level writes, so re-check it here
+        host = VirtualHost.model_validate(embedded)
+        if host.config_path:
+            validate_config_path(
+                host.config_path,
+                allowed_roots=_allowed_config_roots(config),
+                name="virtual_host.config_path",
+            )
+        return host
 
     if not request.target_id:
         return None
@@ -1879,6 +1985,16 @@ async def _attach_ssl(
     domain = request.params.get("domain")
     if not config_path:
         return _fail(request, "target_id (config path) is required", options)
+    try:
+        # this path reaches a root-level write, so it is checked here rather
+        # than relying on the resolve step, which allows attach_ssl through
+        # with no virtual host at all
+        config_path = validate_config_path(
+            config_path,
+            allowed_roots=_allowed_config_roots(config),
+        )
+    except NginxValidationError as exc:
+        return _fail(request, str(exc), options)
     if not domain:
         if virtual_host and virtual_host.server_names:
             domain = virtual_host.server_names[0]
@@ -2537,6 +2653,188 @@ def _reload_argv(nginx_binary: str) -> list[str]:
     return [nginx_binary, "-s", "reload"]
 
 
+def _write_site_config_sync(
+    config_path: str,
+    content: str,
+    *,
+    expected_sha256: str | None,
+    dry_run: bool,
+) -> safe_write.WriteOutcome:
+    """File-side of a whole-config write. Raises on conflict or bad content."""
+    path = Path(config_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"nginx config not found: {config_path}")
+
+    safe_write.guard_content(content)
+    current = safe_write.guard_revision(path, expected_sha256)
+
+    if current == content:
+        return safe_write.WriteOutcome(changed=False, message="no changes")
+
+    diff = safe_write.unified_diff(current, content, config_path)
+    if dry_run:
+        return safe_write.WriteOutcome(
+            changed=True,
+            message=f"dry-run: would update {config_path}",
+            diff=diff,
+        )
+
+    rollback_path = safe_write.take_backups(path)
+    safe_write.atomic_write(path, content)
+    added, removed = safe_write.diff_stat(current, content)
+    return safe_write.WriteOutcome(
+        changed=True,
+        message=f"wrote {config_path} (+{added}/-{removed} lines)",
+        rollback_path=str(rollback_path),
+        diff=diff,
+    )
+
+
+async def _nginx_test(config: NginxExecutorConfig):
+    """Run nginx -t, or return None when nginx is not installed."""
+    if not is_command_available(config.nginx_binary):
+        return None
+    return await run_command([config.nginx_binary, "-t"], timeout=config.timeout)
+
+
+async def _write_site_config(
+    request: ActionRequest,
+    options: ExecutorOptions,
+    *,
+    virtual_host: VirtualHost | None,
+    config: NginxExecutorConfig,
+) -> ActionResult:
+    params = request.params
+    content = params.get("content")
+    if not isinstance(content, str):
+        return _fail(request, "content must be a string", options)
+
+    raw_path = request.target_id or (virtual_host.config_path if virtual_host else None)
+    if not raw_path:
+        return _fail(request, "config path is required", options)
+
+    try:
+        config_path = validate_config_path(
+            raw_path,
+            allowed_roots=_allowed_config_roots(config),
+        )
+        # a file the parser cannot round-trip must not be rewritten by us
+        confparse.check(content)
+    except (NginxValidationError, NginxParseError) as exc:
+        return _fail(request, str(exc), options)
+
+    # nginx -t validates the whole server, so a site that was already broken
+    # elsewhere must not make a good edit here look like a failure
+    baseline = None if options.dry_run else await _nginx_test(config)
+
+    try:
+        outcome = await read(
+            _write_site_config_sync,
+            config_path,
+            content,
+            expected_sha256=params.get("expected_sha256"),
+            dry_run=options.dry_run,
+        )
+    except (ConfigConflictError, FileNotFoundError, ValueError) as exc:
+        return _fail(request, str(exc), options)
+
+    if not outcome.changed:
+        return ActionResult(
+            ok=True,
+            module=MODULE,
+            action_id=request.action_id,
+            message=outcome.message,
+            dry_run=options.dry_run,
+        )
+
+    if options.dry_run:
+        return ActionResult(
+            ok=True,
+            module=MODULE,
+            action_id=request.action_id,
+            message=outcome.message,
+            stdout=outcome.diff,
+            dry_run=True,
+        )
+
+    post = await _nginx_test(config)
+    if post is None:
+        return ActionResult(
+            ok=True,
+            module=MODULE,
+            action_id=request.action_id,
+            message=f"{outcome.message} · nginx not installed, config not tested",
+        )
+
+    if post.ok:
+        message = f"{outcome.message} · nginx -t passed"
+        # reload is a separately consequential act and gets its own audit
+        # entry, so the editor asks for it as a second step; the other
+        # apply_* actions default it to True, this one does not
+        if not params.get("reload", False):
+            return ActionResult(
+                ok=True,
+                module=MODULE,
+                action_id=request.action_id,
+                message=message,
+                stdout=outcome.diff,
+            )
+        reload_result = await _reload(
+            request,
+            options,
+            virtual_host=virtual_host,
+            config=config,
+        )
+        return ActionResult(
+            ok=reload_result.ok,
+            module=MODULE,
+            action_id=request.action_id,
+            message=f"{message} · {'nginx reloaded' if reload_result.ok else 'reload failed'}",
+            stdout=outcome.diff,
+            stderr=reload_result.stderr,
+        )
+
+    if baseline is not None and not baseline.ok:
+        # it was already failing before this edit; rolling back would not fix
+        # anything and would silently throw the user's work away
+        return ActionResult(
+            ok=False,
+            module=MODULE,
+            action_id=request.action_id,
+            message=(
+                f"{outcome.message} · nginx -t still failing "
+                "(it was already failing before this edit — kept your changes)"
+            ),
+            stdout=outcome.diff,
+            stderr=post.stderr,
+        )
+
+    return await read(_rollback_sync, config_path, outcome.rollback_path, request, options, post)
+
+
+def _rollback_sync(config_path, rollback_path, request, options, post) -> ActionResult:
+    try:
+        safe_write.restore(Path(config_path), Path(rollback_path))
+    except OSError as exc:
+        return ActionResult(
+            ok=False,
+            module=MODULE,
+            action_id=request.action_id,
+            message=(
+                f"nginx rejected the config AND the rollback failed: {exc}. "
+                f"Restore {config_path} by hand from {rollback_path}"
+            ),
+            stderr=post.stderr,
+        )
+    return ActionResult(
+        ok=False,
+        module=MODULE,
+        action_id=request.action_id,
+        message=f"nginx rejected the config — rolled back {config_path}",
+        stderr=post.stderr,
+    )
+
+
 _HANDLERS = {
     "view_details": _view_details,
     "test_config": _test_config,
@@ -2553,4 +2851,5 @@ _HANDLERS = {
     "create_site": _create_site,
     "apply_domain_port_settings": _apply_domain_port_settings,
     "apply_location_settings": _apply_location_settings,
+    "write_site_config": _write_site_config,
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -12,7 +13,14 @@ from iw_agent.modules.docker.collector import (
     DEFAULT_DOCKER_SOCKET_PATH,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DOCKER_ENGINE_BASE_URL,
+    collect_containers,
     find_container,
+)
+from iw_agent.modules.docker.compose import (
+    DEFAULT_COMPOSE_TIMEOUT,
+    compose_down,
+    compose_ps,
+    compose_up,
 )
 from iw_agent.modules.docker.schemas import Container
 
@@ -49,6 +57,24 @@ DOCKER_ACTIONS: tuple[ActionSpec, ...] = (
         label="Restart container",
         kind=ActionKind.WRITE,
         description="POST /containers/{id}/restart",
+    ),
+    ActionSpec(
+        id="compose_up",
+        label="Docker compose up",
+        kind=ActionKind.WRITE,
+        description="Run docker compose up -d for a project directory",
+    ),
+    ActionSpec(
+        id="compose_down",
+        label="Docker compose down",
+        kind=ActionKind.WRITE,
+        description="Run docker compose down for a project directory",
+    ),
+    ActionSpec(
+        id="compose_ps",
+        label="Docker compose ps",
+        kind=ActionKind.READ,
+        description="Run docker compose ps for a project directory",
     ),
 )
 
@@ -322,10 +348,163 @@ async def _restart_container(
     )
 
 
+def _compose_params(request: ActionRequest) -> tuple[str, str, str] | None:
+    project_dir = str(request.params.get("project_dir") or request.target_id or "")
+    compose_file = str(request.params.get("compose_file") or "docker-compose.yml")
+    project_name = str(request.params.get("project_name") or "")
+    if not project_dir or not project_name:
+        return None
+    return project_dir, compose_file, project_name
+
+
+async def _compose_up(
+    request: ActionRequest,
+    options: ExecutorOptions,
+    *,
+    config: DockerExecutorConfig,
+) -> ActionResult:
+    params = _compose_params(request)
+    if params is None:
+        return _fail(request, "project_dir and project_name are required", options)
+
+    project_dir, compose_file, project_name = params
+    build = bool(request.params.get("build", True))
+    timeout = float(request.params.get("compose_timeout", DEFAULT_COMPOSE_TIMEOUT))
+
+    try:
+        argv, result = await compose_up(
+            Path(project_dir),
+            compose_file,
+            project_name,
+            build=build,
+            dry_run=options.dry_run,
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        return _fail(request, str(exc), options)
+
+    if options.dry_run:
+        return ActionResult(
+            ok=True,
+            module=MODULE,
+            action_id=request.action_id,
+            message=f"dry-run: would run {' '.join(argv)}",
+            dry_run=True,
+        )
+
+    assert result is not None
+    return ActionResult(
+        ok=result.ok,
+        module=MODULE,
+        action_id=request.action_id,
+        message="docker compose up finished" if result.ok else "docker compose up failed",
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+async def _compose_down(
+    request: ActionRequest,
+    options: ExecutorOptions,
+    *,
+    config: DockerExecutorConfig,
+) -> ActionResult:
+    params = _compose_params(request)
+    if params is None:
+        return _fail(request, "project_dir and project_name are required", options)
+
+    project_dir, compose_file, project_name = params
+    timeout = float(request.params.get("compose_timeout", DEFAULT_COMPOSE_TIMEOUT))
+
+    try:
+        argv, result = await compose_down(
+            Path(project_dir),
+            compose_file,
+            project_name,
+            dry_run=options.dry_run,
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        return _fail(request, str(exc), options)
+
+    if options.dry_run:
+        return ActionResult(
+            ok=True,
+            module=MODULE,
+            action_id=request.action_id,
+            message=f"dry-run: would run {' '.join(argv)}",
+            dry_run=True,
+        )
+
+    assert result is not None
+    return ActionResult(
+        ok=result.ok,
+        module=MODULE,
+        action_id=request.action_id,
+        message="docker compose down finished" if result.ok else "docker compose down failed",
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+async def _compose_ps(
+    request: ActionRequest,
+    options: ExecutorOptions,
+    *,
+    config: DockerExecutorConfig,
+) -> ActionResult:
+    params = _compose_params(request)
+    if params is None:
+        return _fail(request, "project_dir and project_name are required", options)
+
+    project_dir, compose_file, project_name = params
+    timeout = float(request.params.get("compose_timeout", DEFAULT_COMPOSE_TIMEOUT))
+
+    try:
+        argv, result = await compose_ps(
+            Path(project_dir),
+            compose_file,
+            project_name,
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        return _fail(request, str(exc), options)
+
+    assert result is not None
+    text = result.stdout.strip() or result.stderr.strip() or "(no output)"
+    return ActionResult(
+        ok=result.ok,
+        module=MODULE,
+        action_id=request.action_id,
+        message=text,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+async def count_running_compose_containers(
+    project_name: str,
+    *,
+    socket_path: str = DEFAULT_DOCKER_SOCKET_PATH,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+) -> tuple[int, int]:
+    containers = await collect_containers(socket_path=socket_path, timeout=timeout, limit=500)
+    matched = [
+        container
+        for container in containers
+        if container.compose_project_name == project_name
+    ]
+    running = sum(1 for container in matched if container.state.lower() == "running")
+    return running, len(matched)
+
+
 _HANDLERS = {
     "view_details": _view_details,
     "view_logs": _view_logs,
     "start_container": _start_container,
     "stop_container": _stop_container,
     "restart_container": _restart_container,
+    "compose_up": _compose_up,
+    "compose_down": _compose_down,
+    "compose_ps": _compose_ps,
 }

@@ -162,6 +162,9 @@ install_linux_packages_apt() {
         apt-get install -y -qq nginx docker.io 2>/dev/null || {
             apt-get install -y -qq nginx 2>/dev/null || true
         }
+        apt-get install -y -qq certbot python3-certbot-nginx 2>/dev/null || {
+            apt-get install -y -qq certbot 2>/dev/null || true
+        }
     fi
     ui_phase_ok
 }
@@ -176,6 +179,9 @@ install_linux_packages_dnf() {
         dnf install -y -q nginx docker 2>/dev/null || {
             dnf install -y -q nginx 2>/dev/null || true
         }
+        dnf install -y -q certbot python3-certbot-nginx 2>/dev/null || {
+            dnf install -y -q certbot 2>/dev/null || true
+        }
     fi
     ui_phase_ok
 }
@@ -186,6 +192,11 @@ install_linux_packages_apk() {
         python3 py3-pip python3-dev build-base \
         libffi-dev openssl-dev libcap-utils busybox-suid \
         ca-certificates curl git
+    if [ "$SYSTEM_INSTALL" -eq 1 ]; then
+        apk add --no-cache -q nginx docker certbot certbot-nginx 2>/dev/null || {
+            apk add --no-cache -q nginx certbot 2>/dev/null || true
+        }
+    fi
     ui_phase_ok
 }
 
@@ -320,7 +331,7 @@ ui_box_close
 
 ui_box_open info "Next steps"
 ui_box_line "Activate: source $VENV/bin/activate"
-ui_box_line "Try:      iw device · iw ports · iw nginx · iw certs"
+ui_box_line "Try:      iw device · iw ports · iw project · iw nginx · iw certs"
 ui_box_line "Help:     iw --help"
 if [ "$SYSTEM_INSTALL" -eq 0 ] && [ "$os_name" = "Linux" ]; then
     ui_box_line "Server:   sudo ./setup-agent.sh --system"

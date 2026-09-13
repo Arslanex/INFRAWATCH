@@ -113,56 +113,35 @@ Navigation: `b` back · `q` quit
 
 **Flags:** `--timeout SEC` · `--binary PATH` · `nginx-config --show-stdout`
 
-**Interactive:**
+**Interactive (structural editor):**
 
 | Entry | Description |
 |-------|-------------|
-| `iw nginx -i` | Browse sites, pick actions (read/write with confirm + audit log) |
-| `iw` → nginx → **2** | Same site manager from the main menu |
-| `-i` → **Create new site** | Wizard: domain, static or proxy, enable + reload |
-| `--dry-run` | Preview write actions without applying them |
-| `--staging` | Let's Encrypt test certificates (also prompted in `-i`) |
+| `iw nginx -i` | Site picker → full-screen config editor |
+| `iw nginx -i --site app.example.com` | Open that site directly |
+| `iw` → nginx → **2** | Same from the main menu |
+| `--dry-run` | Preview saves and actions without root (no disk writes) |
+| `--staging` | Let's Encrypt test certificates |
 
-Reload, enable, and disable run through the module executor (`sudo` required). `Test nginx config` runs `nginx -t`.
+**Editor layout:** left pane = config tree (line-by-line); right pane = selected directive detail.
 
-**SSL wizard (ngnix executor):**
+| Keys | Action |
+|------|--------|
+| ↑↓ | Move between rows / blocks |
+| → / ← | Expand / fold blocks |
+| Enter | Edit directive (typed form or raw line) |
+| `a` / `A` | Add after / add inside block (`+ add` rows everywhere) |
+| `s` | Save (`nginx -t` + atomic write + rollback on failure) |
+| `x` | Actions: test, reload, enable/disable, HTTPS, diff, revert |
+| `/` `n` `N` | Search, next/previous match |
+| `?` | Help overlay |
+| `q` | Quit |
 
-| Situation | Action in menu |
-|-----------|----------------|
-| NO SSL | Obtain HTTPS certificate (precheck → certbot → attach nginx → HTTP redirect → reload) |
-| EXPIRING / EXPIRED | Renew certificate |
-| MISMATCH | Attach certificate to nginx |
+**New site:** picker → **New site** → minimal wizard (domain, type, enable) → **opens in the editor** for the rest.
 
-Action params: `domain`, `email` (obtain), `method` (`auto`/`nginx`/`webroot`), `staging`, `webroot`.
+HTTPS: use **x → Obtain HTTPS** in the editor (or optional HTTPS during new-site creation).
 
-**Site hub (`-i` → site):** HTTPS (if needed) · Configure · Enable/Disable · Reload · More
-
-**Configure (`-i` → site → Configure site):**
-
-| Group | Sub-sections |
-|-------|----------------|
-| Traffic | Backend, Paths, Static files |
-| Domain & redirects | Names/ports, Redirects |
-| Security | Header presets (Basic / Strict / None) |
-
-Navigation: `b` back · `q` quit
-
-Changes are written to the site config file, then nginx is tested and reloaded (with confirm prompts).
-
-**New site wizard (`-i` → Create new site):**
-
-| Step | What you choose |
-|------|-----------------|
-| Domain | e.g. `app.example.com` |
-| Names | Optional `www` alias and extra domains (comma-separated) |
-| HTTP port | Standard `80` or custom port |
-| Type | Static files or reverse proxy |
-| Static | Document root, try_files (standard or SPA) |
-| Proxy | Backend URL (`proxy_pass`) |
-| Enable | Symlink into `sites-enabled` and reload nginx |
-| HTTPS now | Optional: certbot obtain → attach SSL → HTTP redirect → reload |
-
-Config is written to `sites-available/<domain>`. **HTTPS now** runs the same chain as **Set up HTTPS** on the site hub (requires enable + reload first).
+Requires `sudo` for real saves on the server; `--dry-run` works without root.
 
 ---
 
@@ -214,6 +193,80 @@ Navigation: `b` back · `q` quit
 
 ---
 
+## Projects
+
+Register app repositories and detect how they should be deployed.
+
+| Command | Description |
+|---------|-------------|
+| `iw project` | List registered projects (same as `list`) |
+| `iw project list` | List registered projects |
+| `iw project add <source>` | Clone git repo or register local directory |
+| `iw project detect <name>` | Detect stack type and check ports |
+| `iw project deploy <name>` | Deploy compose/static/proxy projects with optional nginx + HTTPS |
+| `iw project stop <name>` | Run docker compose down |
+| `iw project -i` | Interactive project manager (add, detect, deploy, stop) |
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--workspace PATH` | Projects directory (default: `projects` or `$INFRAWATCH_PROJECTS_DIR`) |
+| `--name NAME` | Project name for `add` (default: repo or folder name) |
+| `--save` | Write detection results to `.infrawatch.json` |
+| `--timeout SEC` | Git clone timeout for `add` (default: 120) / compose timeout for `deploy` (default: 600) |
+| `--dry-run` | Preview deploy/stop without running compose or nginx |
+| `--no-build` | Skip `docker compose --build` on deploy |
+| `--force` | Deploy even if published host ports look busy or certbot precheck warns |
+| `--domain DOMAIN` | Create or update nginx site for this domain |
+| `--https` | Obtain Let's Encrypt certificate after nginx is ready |
+| `--email EMAIL` | Contact email for Let's Encrypt (required with `--https`) |
+| `--no-www` | Do not add `www.<domain>` to `server_name` |
+| `--staging` | Use Let's Encrypt staging certificates |
+| `--backend-port PORT` | Override backend port for nginx `proxy_pass` |
+
+**Detected types (P1):** `docker-compose` · `dockerfile` · `static` · `proxy`
+
+Each project is stored under the workspace with a manifest:
+
+```
+projects/myapp/
+  .infrawatch.json
+  repo/              # clone or symlink to source
+```
+
+**Examples:**
+
+```bash
+iw project add https://github.com/user/myapp.git
+iw project add /path/to/local-app --name myapp
+iw project detect myapp
+iw project detect myapp --save
+iw project deploy myapp
+iw project deploy myapp --domain app.example.com
+iw project deploy myapp --domain app.example.com --https --email admin@example.com
+iw project deploy myapp --dry-run --domain app.example.com --https --email admin@example.com
+iw project deploy mystatic --domain static.example.com
+iw project stop myapp
+iw project list --json
+```
+
+**Deploy flow:**
+
+| Type | Steps |
+|------|-------|
+| `docker-compose` | port check → `docker compose up -d --build` → health check → optional nginx proxy → optional HTTPS |
+| `static` | nginx static site (`--domain` required) → optional HTTPS |
+| `proxy` | nginx reverse proxy to `--backend-port` (`--domain` required) → optional HTTPS |
+
+Nginx reuses existing site configs when the domain is already registered. HTTPS chains certbot obtain → attach SSL → reload (same as `iw nginx` create wizard).
+
+**Interactive (`-i`):** project list → detect · deploy wizard (domain, backend port, HTTPS) · stop · add project. Use `--dry-run` to preview deploy steps.
+
+**Server setup:** `sudo ./setup-agent.sh --system` installs nginx, docker, and certbot on supported Linux distros.
+
+---
+
 ## Quick examples
 
 ```bash
@@ -233,5 +286,7 @@ sudo iw cron -i
 iw containers -i
 sudo iw processes -i
 sudo iw certs -i
+iw project -i
+sudo iw project -i --dry-run
 sudo iw nginx -i --dry-run
 ```

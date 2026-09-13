@@ -59,3 +59,11 @@ class NetworkSnapshot(AgentModel):
             f"NetworkSnapshot(listening_ports={len(self.listening_ports)}, "
             f"outbound_connections={len(self.outbound_connections)})"
         )
+
+
+class PortCheckResult(AgentModel):
+    port: int
+    available: bool
+    listener: Optional[str] = None
+    owner_label: Optional[str] = None
+    note: str = ""

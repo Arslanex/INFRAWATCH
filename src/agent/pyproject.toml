@@ -11,6 +11,9 @@ dependencies = [
     "cryptography",
 ]
 
+[project.optional-dependencies]
+test = ["pytest"]
+
 [project.scripts]
 iw = "iw_agent.cli:main"
 
@@ -23,3 +26,4 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["iw_agent*"]

@@ -71,7 +71,7 @@ infrawatch/
                 ├── network/
                 ├── processes/
                 ├── docker/
-                ├── ngnix/
+                ├── nginx/
                 ├── ssl/
                 └── cron/
 ```

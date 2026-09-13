@@ -7,6 +7,7 @@ from crontab import CronTab
 from iw_agent.core._thread import read
 from iw_agent.core.actions import ActionKind, ActionRequest, ActionResult, ActionSpec, ExecutorOptions
 from iw_agent.core.commands import is_command_available, run_command
+from iw_agent.core.paths import cron_log_dir
 from iw_agent.modules.cron.collector import find_cron_job
 from iw_agent.modules.cron.schemas import CronJob, compute_job_id
 from iw_agent.modules.cron.state_manager import (
@@ -130,7 +131,7 @@ async def _view_job_history(request: ActionRequest, options: ExecutorOptions) ->
     if not job.output_log_path:
         return _fail(request, "this job has no InfraWatch log redirect configured", options)
 
-    log_directory = str(request.params.get("log_directory", "logs/cron"))
+    log_directory = str(request.params.get("log_directory", str(cron_log_dir())))
     tail = int(request.params.get("tail", DEFAULT_EXECUTION_HISTORY_TAIL))
     executions = await collect_cron_executions(log_directory, tail=tail)
     matching = [

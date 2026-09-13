@@ -104,7 +104,7 @@ src/iw_agent/
     ├── network/         # listening ports + outbound connections
     ├── processes/       # process list + cgroup attribution
     ├── docker/          # Docker Engine API (unix socket)
-    ├── ngnix/           # schemas, collector, executor, commands
+    ├── nginx/           # schemas, collector, executor, commands
     ├── ssl/             # schemas, collector, executor, commands
     └── cron/            # crontab jobs + execution history
 ```

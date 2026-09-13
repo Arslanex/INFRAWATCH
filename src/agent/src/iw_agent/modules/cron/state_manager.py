@@ -7,6 +7,7 @@ from pathlib import Path
 from iw_agent.core._thread import read
 from iw_agent.core.exceptions import CronExecutionLogUnreadableError
 from iw_agent.core.logger import logger
+from iw_agent.core.paths import cron_log_dir
 from iw_agent.modules.cron.schemas import CronJobExecution
 
 EXECUTION_HISTORY_SUFFIX = ".runs"
@@ -93,7 +94,7 @@ if __name__ == "__main__":
     import sys
 
     async def _main() -> None:
-        log_directory = sys.argv[1] if len(sys.argv) > 1 else "logs/cron"
+        log_directory = sys.argv[1] if len(sys.argv) > 1 else str(cron_log_dir())
         tail = (
             int(sys.argv[2])
             if len(sys.argv) > 2

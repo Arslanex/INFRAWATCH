@@ -26,7 +26,7 @@ async def run_action(
     target_label: str = "",
 ) -> ActionResult:
     opts = options or ExecutorOptions()
-    if spec.requires_root and not has_effective_root():
+    if spec.requires_root and not opts.dry_run and not has_effective_root():
         raise ActionDeniedError(
             f"{spec.label} requires root — rerun with sudo",
         )

@@ -36,6 +36,7 @@ coverage.xml
 # Logs and runtime data (agent)
 logs/
 *.log
+projects/
 
 # Environment and secrets
 .env

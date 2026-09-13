@@ -6,8 +6,9 @@ import sys
 from iw_agent.cli.output import clear_screen, print_banner
 from iw_agent.cli.registry import collect_command_specs
 from iw_agent.cli.runner import run_async
+from iw_agent.core.paths import cron_log_dir
 
-_MANAGE_COMMANDS = frozenset({"nginx", "cron", "containers", "processes", "certs"})
+_MANAGE_COMMANDS = frozenset({"nginx", "cron", "containers", "processes", "certs", "project"})
 
 
 def run_menu() -> int:
@@ -46,6 +47,7 @@ def _command_menu_args(name: str, args: argparse.Namespace) -> argparse.Namespac
         "containers": ("view containers", "manage containers (start, stop, restart)"),
         "processes": ("view processes", "manage processes (details, kill)"),
         "certs": ("view certificates", "manage certificates (renew, obtain)"),
+        "project": ("view projects", "manage projects (add, deploy, stop)"),
     }
     view_label, manage_label = labels[name]
     print(f"\n{name}:")
@@ -94,7 +96,8 @@ def _default_args() -> argparse.Namespace:
         nginx_binary="nginx",
         certbot_live_dir="/etc/letsencrypt/live",
         nginx_paths=[],
-        log_directory="logs/cron",
+        log_directory=str(cron_log_dir()),
         tail=50,
         show_stdout=False,
+        workspace=None,
     )

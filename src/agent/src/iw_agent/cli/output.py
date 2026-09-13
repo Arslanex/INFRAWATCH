@@ -68,15 +68,47 @@ def prepare_command_view(*, plain: bool = False) -> None:
     clear_screen()
 
 
-def _visible_length(text: str) -> int:
+def visible_length(text: str) -> int:
+    """Width of ``text`` on screen, ignoring ANSI colour codes."""
     return len(_ANSI_RE.sub("", text))
 
 
-def _pad_visible(text: str, width: int) -> str:
-    padding = width - _visible_length(text)
+def pad_visible(text: str, width: int) -> str:
+    padding = width - visible_length(text)
     if padding <= 0:
         return text
     return text + (" " * padding)
+
+
+def truncate_visible(text: str, width: int, *, ellipsis: str = "\u2026") -> str:
+    """Cut ``text`` to ``width`` columns, keeping colour codes balanced."""
+    if width <= 0:
+        return ""
+    if visible_length(text) <= width:
+        return text
+
+    keep = width - len(ellipsis)
+    out = []
+    seen = 0
+    index = 0
+    while index < len(text) and seen < keep:
+        match = _ANSI_RE.match(text, index)
+        if match:
+            out.append(match.group())
+            index = match.end()
+            continue
+        out.append(text[index])
+        seen += 1
+        index += 1
+    out.append(ellipsis)
+    if _ANSI_RE.search(text):
+        out.append(_reset())
+    return "".join(out)
+
+
+# the underscore spellings predate the TUI; kept so existing callers work
+_visible_length = visible_length
+_pad_visible = pad_visible
 
 
 def _color_cell(text: str, color: str) -> str:

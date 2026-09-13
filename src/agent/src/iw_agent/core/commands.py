@@ -46,7 +46,7 @@ async def run_command(
             process.communicate(),
             timeout=timeout,
         )
-    except TimeoutError:
+    except asyncio.TimeoutError:
         await _kill_process_group(process)
         logger.warning("command timed out after %.1fs: %s", timeout, argv[0])
         return CommandResult(
@@ -76,5 +76,5 @@ async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
 
     try:
         await asyncio.wait_for(process.wait(), timeout=_REAP_TIMEOUT)
-    except TimeoutError:
+    except asyncio.TimeoutError:
         logger.error("could not reap a killed command: %s", process.pid)

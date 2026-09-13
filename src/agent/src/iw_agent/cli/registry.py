@@ -30,8 +30,9 @@ def collect_command_specs() -> list[CliCommandSpec]:
     from iw_agent.modules.device.commands import COMMAND_SPECS as device_specs
     from iw_agent.modules.docker.commands import COMMAND_SPECS as docker_specs
     from iw_agent.modules.network.commands import COMMAND_SPECS as network_specs
-    from iw_agent.modules.ngnix.commands import COMMAND_SPECS as ngnix_specs
+    from iw_agent.modules.nginx.commands import COMMAND_SPECS as nginx_specs
     from iw_agent.modules.processes.commands import COMMAND_SPECS as process_specs
+    from iw_agent.modules.project.commands import COMMAND_SPECS as project_specs
     from iw_agent.modules.ssl.commands import COMMAND_SPECS as ssl_specs
 
     specs: list[CliCommandSpec] = []
@@ -40,9 +41,10 @@ def collect_command_specs() -> list[CliCommandSpec]:
         network_specs,
         process_specs,
         docker_specs,
-        ngnix_specs,
+        nginx_specs,
         ssl_specs,
         cron_specs,
+        project_specs,
     ):
         specs.extend(
             CliCommandSpec(

@@ -30,6 +30,7 @@ from iw_agent.cli.parser import add_interactive_flags
 from iw_agent.cli.registry import CliCommandSpec
 from iw_agent.core.actions import ActionRequest, ActionResult, ExecutorOptions
 from iw_agent.core.exceptions import ActionCancelledError, ActionDeniedError
+from iw_agent.core.paths import cron_log_dir
 from iw_agent.modules.cron.collector import collect_cron_jobs
 from iw_agent.modules.cron.schemas import CronJob, CronJobExecution
 from iw_agent.modules.cron.state_manager import (
@@ -225,7 +226,7 @@ def _configure_cron(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--log-dir",
         dest="log_directory",
-        default="logs/cron",
+        default=str(cron_log_dir()),
         help="directory with .runs files (default: logs/cron)",
     )
     parser.add_argument(
@@ -240,7 +241,7 @@ def _configure_history(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--log-dir",
         dest="log_directory",
-        default="logs/cron",
+        default=str(cron_log_dir()),
         help="directory with .runs files (default: logs/cron)",
     )
     parser.add_argument(
